@@ -27,6 +27,9 @@ func genRegistration(cfg Config, resources []Resource) ([]byte, error) {
 	fmt.Fprintf(&b, "\treturn []func() datasource.DataSource{\n")
 	for _, r := range resources {
 		fmt.Fprintf(&b, "\t\tNew%sDataSource,\n", r.Noun)
+		if r.Plural {
+			fmt.Fprintf(&b, "\t\t%s,\n", r.pluralCtor())
+		}
 	}
 	fmt.Fprintf(&b, "\t}\n}\n")
 	return gofmt(b.String())
@@ -197,11 +200,21 @@ func genCreate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 	fmt.Fprintf(b, "\tres, err := %s.%s(ctx, p)\n", svc, r.Create.Method)
 	fmt.Fprintf(b, "\tif err != nil {\n\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\treturn\n\t}\n", r.cmdlet("New")+" failed")
 	fmt.Fprintf(b, "\tobj := firstObject(res.Value)\n")
-	fmt.Fprintf(b, "\tif obj == nil {\n\t\tresp.Diagnostics.AddError(%q, %q)\n\t\treturn\n\t}\n", r.cmdlet("New")+" returned no object", "the cmdlet did not return the created object")
 	fmt.Fprintf(b, "\tcfg := plan\n")
-	fmt.Fprintf(b, "\tident := %s\n", r.identityReadExpr())
+	// Read-back target: for IdentityIsName the New cmdlet may not echo the created
+	// object (the Teams policy API stores it but returns an empty body), so refresh
+	// by the user-chosen identity rather than a field of the (possibly nil)
+	// response.
+	if r.IdentityIsName {
+		fmt.Fprintf(b, "\tident := plan.Identity.ValueString()\n")
+	} else {
+		fmt.Fprintf(b, "\tident := %s\n", r.identityReadExpr())
+	}
 	fmt.Fprintf(b, "\tif !r.refresh(ctx, ident, &plan, &resp.Diagnostics, nil) {\n")
 	fmt.Fprintf(b, "\t\tif resp.Diagnostics.HasError() {\n\t\t\treturn\n\t\t}\n")
+	// The object couldn't be read back; fall back to the create response, or fail
+	// if the API returned neither.
+	fmt.Fprintf(b, "\t\tif obj == nil {\n\t\t\tresp.Diagnostics.AddError(%q, %q)\n\t\t\treturn\n\t\t}\n", r.cmdlet("New")+" returned no object", "the cmdlet did not return the created object and it could not be read back")
 	fmt.Fprintf(b, "\t\tread%s(ctx, obj, &plan)\n\t}\n", r.Noun)
 	if mc := r.Members; mc != nil {
 		fmt.Fprintf(b, "\tif mem := toStringSlice(ctx, cfg.%s, &resp.Diagnostics); len(mem) > 0 {\n", mc.Field)
@@ -268,9 +281,13 @@ func genReadInto(b *bytes.Buffer, r Resource, model string) {
 		return
 	}
 	fmt.Fprintf(b, "\tm.ID = types.StringValue(firstNonEmptyStr(getString(obj, %q), getString(obj, %q), getString(obj, %q)))\n", "Guid", "Id", "Identity")
-	// For a per-object config, identity is a required input and must not be
-	// overwritten by a (possibly differently-formatted) read-back value.
-	if !(r.Config && !r.Singleton) {
+	// Identity is a user-supplied key here and must not be overwritten by a
+	// (possibly differently-formatted) read-back value:
+	//   - per-object config: identity is a required input;
+	//   - IdentityIsName: the read-back carries the scoped form (e.g. "Tag:X")
+	//     while the operator configured the bare name "X" — overwriting it would
+	//     churn the plan and fail the Required-attribute consistency check.
+	if !(r.Config && !r.Singleton) && !r.IdentityIsName {
 		fmt.Fprintf(b, "\tm.Identity = types.StringValue(%s)\n", r.identityReadExpr())
 	}
 	for _, a := range r.Attributes {
@@ -365,8 +382,11 @@ func genImport(b *bytes.Buffer, recv string) {
 }
 
 func genHelpers(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg string) {
-	// identityOf
-	fmt.Fprintf(b, "func (r *%s) identityOf(m %s) any {\n", recv, model)
+	// identityOf. Returns string (never a non-string): the identity is always a
+	// user-facing key (name/GUID/DN). Threading it as string — not any — lets the
+	// generated read/delete calls target params typed as a concrete string (e.g.
+	// -UserId) as well as the usual System.Object -Identity params.
+	fmt.Fprintf(b, "func (r *%s) identityOf(m %s) string {\n", recv, model)
 	fmt.Fprintf(b, "\tif v := m.Identity.ValueString(); v != \"\" {\n\t\treturn v\n\t}\n")
 	fmt.Fprintf(b, "\tif v := m.ID.ValueString(); v != \"\" {\n\t\treturn v\n\t}\n")
 	if r.hasName() {
@@ -377,7 +397,7 @@ func genHelpers(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg s
 	fmt.Fprintf(b, "}\n\n")
 
 	// refresh
-	fmt.Fprintf(b, "func (r *%s) refresh(ctx context.Context, identity any, m *%s, diags *diag.Diagnostics, reflected func(map[string]any) bool) bool {\n", recv, model)
+	fmt.Fprintf(b, "func (r *%s) refresh(ctx context.Context, identity string, m *%s, diags *diag.Diagnostics, reflected func(map[string]any) bool) bool {\n", recv, model)
 	fmt.Fprintf(b, "\tget := func(ctx context.Context) (map[string]any, bool, error) {\n")
 	if r.Read.IdentityField != "" {
 		fmt.Fprintf(b, "\t\tres, gerr := %s.%s(ctx, %s.%s{%s: identity})\n", svc, r.Read.Method, pkg, r.Read.Params, r.Read.IdentityField)
@@ -414,7 +434,7 @@ func genHelpers(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg s
 	// if it never becomes visible it leaves an unset attribute empty rather than
 	// failing the read.
 	if mc := r.Members; mc != nil {
-		fmt.Fprintf(b, "\nfunc read%sMembers(ctx context.Context, svc *%s.Service, identity any, m *%s) {\n", r.Noun, pkg, model)
+		fmt.Fprintf(b, "\nfunc read%sMembers(ctx context.Context, svc *%s.Service, identity string, m *%s) {\n", r.Noun, pkg, model)
 		fmt.Fprintf(b, "\tvals, present, err := resourcex.LoadUntil(ctx, consistency.Config{}, func(ctx context.Context) ([]map[string]any, bool, error) {\n")
 		fmt.Fprintf(b, "\t\tres, gerr := svc.%s(ctx, %s.%s{%s: identity})\n", mc.ReadMethod, pkg, mc.ReadParams, mc.IdentityField)
 		fmt.Fprintf(b, "\t\tif gerr != nil {\n\t\t\tif isNotFound(gerr) {\n\t\t\t\treturn nil, false, nil\n\t\t\t}\n\t\t\treturn nil, false, gerr\n\t\t}\n")

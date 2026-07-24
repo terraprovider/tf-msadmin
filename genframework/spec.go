@@ -127,6 +127,12 @@ type Resource struct {
 	// Required, RequiresReplace input and is passed to Create via
 	// Create.IdentityField (default "Identity").
 	IdentityIsName bool
+	// Plural, when true, additionally emits a plural ("list") data source that
+	// calls Get-<Noun> with no key and returns every object as a read-only list
+	// of nested objects (attribute named after the pluralised TFName, e.g.
+	// role_groups). Reuses the singular's <noun>Model element + read<Noun> mapper.
+	// Not meaningful for Singleton configs (there is only one object).
+	Plural bool
 	// SparseWrite makes create/update send only the fields the operator actually
 	// set, matching how the PowerShell cmdlets behave (they touch only the
 	// parameters you pass). Create omits attributes whose plan value is unknown or

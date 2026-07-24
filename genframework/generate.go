@@ -35,6 +35,14 @@ func Generate(cfg Config, resources []Resource) ([]File, error) {
 			return nil, fmt.Errorf("%s data source: %w", r.Noun, err)
 		}
 		files = append(files, File{Name: r.TFName + "_data_source.go", Content: ds})
+
+		if r.Plural {
+			pds, err := genPluralDataSource(cfg, r)
+			if err != nil {
+				return nil, fmt.Errorf("%s plural data source: %w", r.Noun, err)
+			}
+			files = append(files, File{Name: r.pluralTFName() + "_data_source.go", Content: pds})
+		}
 	}
 
 	reg, err := genRegistration(cfg, sorted)
@@ -67,6 +75,44 @@ func (r Resource) model() string    { return lowerFirst(r.Noun) + "Model" }
 func (r Resource) ctor() string     { return "New" + r.Noun + "Resource" }
 func (r Resource) hasMembers() bool { return r.Members != nil }
 func (r Resource) hasSet() bool     { return r.hasType(TypeStringSet) || r.Members != nil }
+
+// plural* name the emitted "list" data source, which shares the singular's
+// element model and read<Noun> mapper.
+func (r Resource) pluralRecv() string   { return lowerFirst(r.Noun) + "ListDataSource" }
+func (r Resource) pluralModel() string  { return lowerFirst(r.Noun) + "ListModel" }
+func (r Resource) pluralCtor() string   { return "New" + r.Noun + "ListDataSource" }
+func (r Resource) pluralTFName() string { return pluralizeSnake(r.TFName) }
+
+// pluralizeSnake pluralises the last word of a snake_case name using simple
+// English rules: "compliance_case" -> "compliance_cases", "retention_policy" ->
+// "retention_policies", "dlp_edm_schema" -> "dlp_edm_schemas".
+func pluralizeSnake(s string) string {
+	i := strings.LastIndex(s, "_")
+	head, word := "", s
+	if i >= 0 {
+		head, word = s[:i+1], s[i+1:]
+	}
+	switch {
+	case word == "":
+		return s
+	case strings.HasSuffix(word, "y") && len(word) >= 2 && !isVowel(word[len(word)-2]):
+		word = word[:len(word)-1] + "ies"
+	case strings.HasSuffix(word, "s"), strings.HasSuffix(word, "x"), strings.HasSuffix(word, "z"),
+		strings.HasSuffix(word, "ch"), strings.HasSuffix(word, "sh"):
+		word += "es"
+	default:
+		word += "s"
+	}
+	return head + word
+}
+
+func isVowel(b byte) bool {
+	switch b {
+	case 'a', 'e', 'i', 'o', 'u':
+		return true
+	}
+	return false
+}
 
 // memberReadExpr renders firstNonEmptyStr(getString(mm,"K1"), getString(mm,"K2"), ...)
 // over the member collection's read-back keys, used to extract a member identity.

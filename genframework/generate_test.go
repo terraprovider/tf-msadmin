@@ -219,4 +219,23 @@ func TestIdentityIsName(t *testing.T) {
 	if !strings.Contains(res, "p.Identity = plan.Identity.ValueString()") {
 		t.Error("Create must pass the identity/name to the New params when IdentityIsName")
 	}
+	// Create reads back by the user's identity (the New cmdlet may not echo the
+	// created object), not by a field of the response.
+	if !strings.Contains(res, "ident := plan.Identity.ValueString()") {
+		t.Error("Create must refresh by plan.Identity when IdentityIsName (New may return no object)")
+	}
+	// The empty-response error must be a fallback *inside* the refresh miss, not a
+	// hard pre-check that fires before read-back.
+	if strings.Contains(res, "obj := firstObject(res.Value)\n\tif obj == nil {") {
+		t.Error("obj==nil must be a refresh fallback, not a hard pre-check, for IdentityIsName")
+	}
+	// read<Noun> must NOT overwrite Identity from the read-back (it carries the
+	// scoped "Tag:X" form while the operator configured the bare "X").
+	readFn := res[strings.Index(res, "func readMeetingPolicy("):]
+	if i := strings.Index(readFn, "\n}\n"); i >= 0 {
+		readFn = readFn[:i]
+	}
+	if strings.Contains(readFn, "m.Identity = types.StringValue") {
+		t.Error("readMeetingPolicy must not overwrite Identity for IdentityIsName")
+	}
 }
