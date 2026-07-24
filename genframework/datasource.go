@@ -80,7 +80,11 @@ func genDataSource(cfg Config, r Resource) ([]byte, error) {
 	} else {
 		fmt.Fprintf(&b, "\tidentity := firstNonEmptyStr(data.Identity.ValueString(), data.ID.ValueString())\n")
 	}
-	fmt.Fprintf(&b, "\tif identity == \"\" {\n\t\tresp.Diagnostics.AddError(%q, %q)\n\t\treturn\n\t}\n", "Missing lookup key", "set identity"+nameHint(r)+" to select the object")
+	// A singleton read takes no key (Read.IdentityField == ""); only require an
+	// identity when the read actually uses one to select the object.
+	if r.Read.IdentityField != "" {
+		fmt.Fprintf(&b, "\tif identity == \"\" {\n\t\tresp.Diagnostics.AddError(%q, %q)\n\t\treturn\n\t}\n", "Missing lookup key", "set identity"+nameHint(r)+" to select the object")
+	}
 	fmt.Fprintf(&b, "\tget := func(ctx context.Context) (map[string]any, bool, error) {\n")
 	if r.Read.IdentityField != "" {
 		fmt.Fprintf(&b, "\t\tres, gerr := %s.%s(ctx, %s.%s{%s: identity})\n", svc, r.Read.Method, pkg, r.Read.Params, r.Read.IdentityField)
