@@ -64,6 +64,8 @@ func TestPluralDataSource(t *testing.T) {
 		"schema.ListNestedAttribute{Computed: true",
 		"exo.GetRetentionPolicyParams{}",
 		"readRetentionPolicy(ctx, obj, &e)",
+		"e.Identity = types.StringValue(", // list elements get their identity from the read-back
+
 		`req.ProviderTypeName + "_retention_policies"`,
 	} {
 		if !strings.Contains(plural, want) {

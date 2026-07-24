@@ -168,9 +168,8 @@ func genPluralDataSource(cfg Config, r Resource) ([]byte, error) {
 	fmt.Fprintf(&b, "\t%q\n\n", "context")
 	fmt.Fprintf(&b, "\t%q\n", "github.com/hashicorp/terraform-plugin-framework/datasource")
 	fmt.Fprintf(&b, "\t%q\n", "github.com/hashicorp/terraform-plugin-framework/datasource/schema")
-	if r.hasSet() {
-		fmt.Fprintf(&b, "\t%q\n", "github.com/hashicorp/terraform-plugin-framework/types")
-	}
+	// Always needed: each element's identity is set via types.StringValue below.
+	fmt.Fprintf(&b, "\t%q\n", "github.com/hashicorp/terraform-plugin-framework/types")
 	fmt.Fprintf(&b, "\n\t%q\n", cfg.BindingsImport)
 	fmt.Fprintf(&b, "\t%q\n", cfg.ClientsImport)
 	fmt.Fprintf(&b, ")\n\n")
@@ -224,6 +223,10 @@ func genPluralDataSource(cfg Config, r Resource) ([]byte, error) {
 	fmt.Fprintf(&b, "\tfor _, obj := range res.Value {\n")
 	fmt.Fprintf(&b, "\t\tvar e %s\n", elem)
 	fmt.Fprintf(&b, "\t\tread%s(ctx, obj, &e)\n", r.Noun)
+	// read<Noun> preserves a user-supplied identity for the singular resource/data
+	// source (and so leaves it unset for IdentityIsName), but a list element has no
+	// input identity — populate it from the read-back object here.
+	fmt.Fprintf(&b, "\t\te.Identity = types.StringValue(%s)\n", r.identityReadExpr())
 	if r.Members != nil {
 		fmt.Fprintf(&b, "\t\te.%s = stringSetValue(ctx, nil)\n", r.Members.Field)
 	}
