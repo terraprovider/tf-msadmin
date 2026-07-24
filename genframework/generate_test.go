@@ -239,3 +239,49 @@ func TestIdentityIsName(t *testing.T) {
 		t.Error("readMeetingPolicy must not overwrite Identity for IdentityIsName")
 	}
 }
+
+// TestInt64Attribute covers the TypeInt path (int / *int64 bindings): int
+// attributes become types.Int64 with a schema.Int64Attribute, the int64
+// planmodifier import, pointer accessors for tri-state params, getInt read-back,
+// and reconcile.KeepInt64.
+func TestInt64Attribute(t *testing.T) {
+	cfg := Config{
+		Package: "provider", ClientsImport: "example.com/clients", ClientField: "CS",
+		BindingsImport: "github.com/terraprovider/go-teams/cs", BindingsPkg: "cs",
+	}
+	r := Resource{
+		Noun: "OnlinePSTNGateway", TFName: "online_pstn_gateway", Description: "A gateway.",
+		IdentityIsName: true, SparseWrite: true,
+		Attributes: []Attribute{
+			{TFName: "sip_signaling_port", Field: "SipSignalingPort", APIName: "SipSignalingPort", Type: TypeInt, Computed: true, PointerParam: true, Description: "SIP port.", InCreate: true, InUpdate: true},
+		},
+		Create: Op{Method: "NewCsOnlinePSTNGateway", Params: "NewCsOnlinePSTNGatewayParams", IdentityField: "Identity"},
+		Read:   Op{Method: "GetCsOnlinePSTNGateway", Params: "GetCsOnlinePSTNGatewayParams", IdentityField: "Identity"},
+		Update: Op{Method: "SetCsOnlinePSTNGateway", Params: "SetCsOnlinePSTNGatewayParams", IdentityField: "Identity"},
+		Delete: Op{Method: "RemoveCsOnlinePSTNGateway", Params: "RemoveCsOnlinePSTNGatewayParams", IdentityField: "Identity"},
+	}
+	files, err := Generate(cfg, []Resource{r})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	var res string
+	for _, f := range files {
+		if f.Name == "online_pstn_gateway_resource.go" {
+			res = string(f.Content)
+		}
+	}
+	for _, want := range []string{
+		"SipSignalingPort types.Int64", // model field (gofmt pads the tag column)
+		"tfsdk:\"sip_signaling_port\"",
+		"schema.Int64Attribute{",
+		"resource/schema/int64planmodifier",
+		"int64planmodifier.UseStateForUnknown()",
+		"plan.SipSignalingPort.ValueInt64Pointer()",
+		"types.Int64Value(getInt(obj, \"SipSignalingPort\"))",
+		"reconcile.KeepInt64(",
+	} {
+		if !strings.Contains(res, want) {
+			t.Errorf("int64 attribute missing %q", want)
+		}
+	}
+}

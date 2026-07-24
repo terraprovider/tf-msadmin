@@ -20,6 +20,7 @@ const (
 	TypeString    AttrType = iota // types.String  <- string / *.guid
 	TypeBool                      // types.Bool    <- switch / bool
 	TypeStringSet                 // types.Set of String <- []string
+	TypeInt                       // types.Int64   <- int / *int64
 )
 
 // Attribute is one resource attribute derived from a cmdlet parameter (and its

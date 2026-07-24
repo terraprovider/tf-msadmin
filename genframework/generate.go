@@ -138,6 +138,17 @@ func (r Resource) hasBoolMod() bool {
 	}
 	return false
 }
+
+// hasInt64Mod reports whether any Int64 attribute emits a plan modifier, which
+// requires the int64planmodifier import.
+func (r Resource) hasInt64Mod() bool {
+	for _, a := range r.Attributes {
+		if a.Type == TypeInt && a.planModifiers() != "" {
+			return true
+		}
+	}
+	return false
+}
 func (r Resource) hasName() bool { return r.field("Name") != nil }
 func (r Resource) cmdlet(v string) string {
 	return v + "-" + r.Noun
@@ -181,6 +192,8 @@ func (a Attribute) tfType() string {
 		return "Bool"
 	case TypeStringSet:
 		return "Set"
+	case TypeInt:
+		return "Int64"
 	default:
 		return "String"
 	}
@@ -192,6 +205,8 @@ func (a Attribute) keepFn() string {
 		return "KeepBool"
 	case TypeStringSet:
 		return "KeepSet"
+	case TypeInt:
+		return "KeepInt64"
 	default:
 		return "KeepStr"
 	}
@@ -224,6 +239,17 @@ func (a Attribute) schemaAttr() string {
 		fmt.Fprintf(&b, "Description: %q, ", a.Description)
 		if mods != "" {
 			fmt.Fprintf(&b, "PlanModifiers: []planmodifier.Set{%s}, ", mods)
+		}
+		b.WriteString("}")
+	case TypeInt:
+		b.WriteString("schema.Int64Attribute{")
+		b.WriteString(a.modeFields())
+		if a.Sensitive {
+			b.WriteString("Sensitive: true, ")
+		}
+		fmt.Fprintf(&b, "Description: %q, ", a.Description)
+		if mods != "" {
+			fmt.Fprintf(&b, "PlanModifiers: []planmodifier.Int64{%s}, ", mods)
 		}
 		b.WriteString("}")
 	default:
@@ -276,6 +302,11 @@ func (a Attribute) planValue() string {
 		return "plan." + a.Field + ".ValueBool()"
 	case TypeStringSet:
 		return "toStringSlice(ctx, plan." + a.Field + ", &resp.Diagnostics)"
+	case TypeInt:
+		if a.PointerParam {
+			return "plan." + a.Field + ".ValueInt64Pointer()"
+		}
+		return "plan." + a.Field + ".ValueInt64()"
 	default:
 		if a.PointerParam {
 			return "plan." + a.Field + ".ValueStringPointer()"
@@ -291,6 +322,8 @@ func (a Attribute) readAssign() string {
 		return fmt.Sprintf("m.%s = types.BoolValue(getBool(obj, %q))", a.Field, a.APIName)
 	case TypeStringSet:
 		return fmt.Sprintf("m.%s = stringSetValue(ctx, getStringSlice(obj, %q))", a.Field, a.APIName)
+	case TypeInt:
+		return fmt.Sprintf("m.%s = types.Int64Value(getInt(obj, %q))", a.Field, a.APIName)
 	default:
 		return fmt.Sprintf("m.%s = types.StringValue(getString(obj, %q))", a.Field, a.APIName)
 	}

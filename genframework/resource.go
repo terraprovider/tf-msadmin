@@ -60,6 +60,9 @@ func genResource(cfg Config, r Resource) ([]byte, error) {
 	if r.hasSet() {
 		fmt.Fprintf(&b, "\t%q\n", "github.com/hashicorp/terraform-plugin-framework/resource/schema/setplanmodifier")
 	}
+	if r.hasInt64Mod() {
+		fmt.Fprintf(&b, "\t%q\n", "github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier")
+	}
 	fmt.Fprintf(&b, "\t%q\n", "github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier")
 	fmt.Fprintf(&b, "\t%q\n\n", "github.com/hashicorp/terraform-plugin-framework/types")
 	fmt.Fprintf(&b, "\t%q\n", "github.com/terraprovider/go-msadmin/consistency")

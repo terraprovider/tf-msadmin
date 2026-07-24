@@ -39,6 +39,14 @@ func KeepBool(cfg, read types.Bool) types.Bool {
 	return read
 }
 
+// KeepInt64 is KeepStr for int64 attributes.
+func KeepInt64(cfg, read types.Int64) types.Int64 {
+	if !cfg.IsNull() && !cfg.IsUnknown() {
+		return cfg
+	}
+	return read
+}
+
 // KeepList is KeepStr for list attributes.
 func KeepList(cfg, read types.List) types.List {
 	if !cfg.IsNull() && !cfg.IsUnknown() {
