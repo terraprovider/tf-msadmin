@@ -63,7 +63,7 @@ func genResource(cfg Config, r Resource) ([]byte, error) {
 	if r.hasBoolMod() {
 		fmt.Fprintf(&b, "\t%q\n", "github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier")
 	}
-	if r.hasSet() {
+	if r.hasSetMod() {
 		fmt.Fprintf(&b, "\t%q\n", "github.com/hashicorp/terraform-plugin-framework/resource/schema/setplanmodifier")
 	}
 	if r.hasInt64Mod() {

@@ -154,6 +154,21 @@ func (r Resource) hasInt64Mod() bool {
 	}
 	return false
 }
+
+// hasSetMod reports whether any set attribute (or the members set) emits a plan
+// modifier, which requires the setplanmodifier import. A Required-only set has none.
+func (r Resource) hasSetMod() bool {
+	if r.Members != nil {
+		return true
+	}
+	for _, a := range r.Attributes {
+		if a.Type == TypeStringSet && a.planModifiers() != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func (r Resource) hasName() bool { return r.field("Name") != nil }
 func (r Resource) cmdlet(v string) string {
 	return v + "-" + r.Noun
