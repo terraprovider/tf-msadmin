@@ -42,6 +42,12 @@ type Attribute struct {
 	// only assigned when non-empty, so an empty string is not marshalled as a
 	// value. Object attributes are always TypeString.
 	Object bool
+	// WriteOnly marks an attribute the API accepts on write but never returns on
+	// read (e.g. a site script's Content). The generated readInto skips it, so a
+	// refresh never clobbers the configured/state value; create/update still send
+	// it and reconcile keeps the configured value authoritative. Requires the
+	// attribute be Required or Optional+Computed with a known value.
+	WriteOnly bool
 	// PointerParam is true when the binding's params field is a pointer
 	// (*bool / *string) rather than a value — the case for tri-state
 	// (Nullable<T>) APIs like the Teams config surface, where an explicit false /

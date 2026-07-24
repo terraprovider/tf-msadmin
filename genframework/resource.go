@@ -300,6 +300,9 @@ func genReadInto(b *bytes.Buffer, r Resource, model string) {
 		fmt.Fprintf(b, "\tm.Identity = types.StringValue(%s)\n", r.identityReadExpr())
 	}
 	for _, a := range r.Attributes {
+		if a.WriteOnly {
+			continue // API never returns it; keep the configured/state value
+		}
 		fmt.Fprintf(b, "\t%s\n", a.readAssign())
 	}
 	fmt.Fprintf(b, "\t_ = ctx\n}\n\n")
