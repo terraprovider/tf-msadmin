@@ -83,6 +83,9 @@ func genResource(cfg Config, r Resource) ([]byte, error) {
 	fmt.Fprintf(&b, "\t_ resource.Resource = &%s{}\n", recv)
 	fmt.Fprintf(&b, "\t_ resource.ResourceWithConfigure = &%s{}\n", recv)
 	fmt.Fprintf(&b, "\t_ resource.ResourceWithImportState = &%s{}\n", recv)
+	if r.adoptsExisting() {
+		fmt.Fprintf(&b, "\t_ resource.ResourceWithModifyPlan = &%s{}\n", recv)
+	}
 	fmt.Fprintf(&b, ")\n\n")
 	fmt.Fprintf(&b, "type %s struct{ client *clients.Client }\n\n", recv)
 	if r.Config {
@@ -154,6 +157,9 @@ func genResource(cfg Config, r Resource) ([]byte, error) {
 		genDelete(&b, cfg, r, recv, model, svc, pkg)
 	}
 	genImport(&b, recv)
+	if r.adoptsExisting() {
+		genModifyPlan(&b, r, recv, model, svc, pkg)
+	}
 	genHelpers(&b, cfg, r, recv, model, svc, pkg)
 
 	return gofmt(b.String())
@@ -164,6 +170,23 @@ func genCreate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 	fmt.Fprintf(b, "\tvar plan %s\n", model)
 	fmt.Fprintf(b, "\tresp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)\n")
 	fmt.Fprintf(b, "\tif resp.Diagnostics.HasError() {\n\t\treturn\n\t}\n\n")
+	if r.SparseWrite {
+		// Read the config (what the operator actually wrote) so the sparse write can
+		// send only configured attributes — the correct signal even when ModifyPlan
+		// has filled the plan's unset Optional+Computed values with the object's
+		// current values (see genModifyPlan). config.<attr> is null for anything the
+		// operator did not set.
+		fmt.Fprintf(b, "\tvar config %s\n", model)
+		fmt.Fprintf(b, "\tresp.Diagnostics.Append(req.Config.Get(ctx, &config)...)\n")
+		fmt.Fprintf(b, "\tif resp.Diagnostics.HasError() {\n\t\treturn\n\t}\n\n")
+	}
+	// Adopt short-circuit: a reserved singleton identity (e.g. "Global") already
+	// exists and cannot be created via New, so when the operator declares it,
+	// adopt the existing object by applying Set and reading back — no manual
+	// `terraform import` needed. Custom identities fall through to the New path.
+	if r.AdoptIdentity != "" {
+		genAdoptBranch(b, r, svc, pkg)
+	}
 	if r.SparseWrite {
 		// Sparse create: send only the fields the operator actually set. Every
 		// unconfigured Optional+Computed attribute is unknown here; omitting it
@@ -176,10 +199,10 @@ func genCreate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 				continue
 			}
 			if a.Object {
-				fmt.Fprintf(b, "\tif v := plan.%s.ValueString(); v != \"\" {\n\t\tp.%s = v\n\t}\n", a.Field, a.Field)
+				fmt.Fprintf(b, "\tif v := config.%s.ValueString(); v != \"\" {\n\t\tp.%s = objectParam(v)\n\t}\n", a.Field, a.Field)
 				continue
 			}
-			fmt.Fprintf(b, "\tif !plan.%s.IsUnknown() && !plan.%s.IsNull() {\n\t\tp.%s = %s\n\t}\n", a.Field, a.Field, a.Field, a.planValue())
+			fmt.Fprintf(b, "\tif !config.%s.IsNull() {\n\t\tp.%s = %s\n\t}\n", a.Field, a.Field, a.planValue())
 		}
 	} else {
 		fmt.Fprintf(b, "\tp := %s.%s{\n", pkg, r.Create.Params)
@@ -193,7 +216,7 @@ func genCreate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 		// not marshalled as a value.
 		for _, a := range r.Attributes {
 			if a.InCreate && a.Object {
-				fmt.Fprintf(b, "\tif v := plan.%s.ValueString(); v != \"\" {\n\t\tp.%s = v\n\t}\n", a.Field, a.Field)
+				fmt.Fprintf(b, "\tif v := plan.%s.ValueString(); v != \"\" {\n\t\tp.%s = objectParam(v)\n\t}\n", a.Field, a.Field)
 			}
 		}
 	}
@@ -236,6 +259,101 @@ func genCreate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 	fmt.Fprintf(b, "\tresp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)\n}\n\n")
 }
 
+// genAdoptBranch emits the Create adopt short-circuit for an IdentityIsName
+// resource with a reserved AdoptIdentity (e.g. "Global"): that object is a
+// pre-existing tenant singleton that cannot be created via New, so when the
+// operator declares it, adopt it by applying Set (like genConfigCreate) and
+// reading back, then return before the New path. Delete drops it from state
+// instead of removing it (see genDelete).
+func genAdoptBranch(b *bytes.Buffer, r Resource, svc, pkg string) {
+	idField := r.Update.IdentityField
+	if idField == "" {
+		idField = "Identity"
+	}
+	fmt.Fprintf(b, "\tif plan.Identity.ValueString() == %q {\n", r.AdoptIdentity)
+	fmt.Fprintf(b, "\t\tsp := %s.%s{}\n", pkg, r.Update.Params)
+	fmt.Fprintf(b, "\t\tsp.%s = plan.Identity.ValueString()\n", idField)
+	for _, a := range r.Attributes {
+		if !a.InUpdate {
+			continue
+		}
+		switch {
+		case a.Object:
+			fmt.Fprintf(b, "\t\tif v := config.%s.ValueString(); v != \"\" {\n\t\t\tsp.%s = objectParam(v)\n\t\t}\n", a.Field, a.Field)
+		default:
+			// Adopt is always SparseWrite: send only what the operator configured
+			// (config, not the ModifyPlan-filled plan).
+			fmt.Fprintf(b, "\t\tif !config.%s.IsNull() {\n\t\t\tsp.%s = %s\n\t\t}\n", a.Field, a.Field, a.planValue())
+		}
+	}
+	fmt.Fprintf(b, "\t\tif resp.Diagnostics.HasError() {\n\t\t\treturn\n\t\t}\n")
+	fmt.Fprintf(b, "\t\tif _, err := %s.%s(ctx, sp); err != nil {\n\t\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\t\treturn\n\t\t}\n", svc, r.Update.Method, r.cmdlet("Set")+" failed")
+	fmt.Fprintf(b, "\t\tcfg := plan\n")
+	fmt.Fprintf(b, "\t\tident := plan.Identity.ValueString()\n")
+	fmt.Fprintf(b, "\t\tif !r.refresh(ctx, ident, &plan, &resp.Diagnostics, nil) {\n")
+	fmt.Fprintf(b, "\t\t\tif !resp.Diagnostics.HasError() {\n\t\t\t\tresp.Diagnostics.AddError(%q, %q)\n\t\t\t}\n\t\t\treturn\n\t\t}\n",
+		r.Noun+" not found", "identity "+r.AdoptIdentity+" does not exist and cannot be created")
+	if mc := r.Members; mc != nil {
+		fmt.Fprintf(b, "\t\tif mem := toStringSlice(ctx, cfg.%s, &resp.Diagnostics); len(mem) > 0 {\n", mc.Field)
+		fmt.Fprintf(b, "\t\t\tif merr := resourcex.RetryWrite(ctx, consistency.Config{}, func(ctx context.Context) error {\n")
+		fmt.Fprintf(b, "\t\t\t\t_, e := %s.%s(ctx, %s.%s{%s: ident, %s: mem})\n\t\t\t\treturn e\n\t\t\t}, isNotFound); merr != nil {\n", svc, mc.UpdateMethod, pkg, mc.UpdateParams, mc.IdentityField, mc.MembersField)
+		fmt.Fprintf(b, "\t\t\t\tresp.Diagnostics.AddError(%q, merr.Error())\n\t\t\t\treturn\n\t\t\t}\n", "Update-"+r.Noun+"Member failed")
+		fmt.Fprintf(b, "\t\t\tread%sMembers(ctx, %s, ident, &plan)\n\t\t}\n", r.Noun, svc)
+	}
+	fmt.Fprintf(b, "\t\tr.reconcileState(&cfg, &plan)\n")
+	fmt.Fprintf(b, "\t\tresp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)\n")
+	fmt.Fprintf(b, "\t\treturn\n\t}\n")
+}
+
+// genModifyPlan emits ModifyPlan for a resource that, on create, manages an object
+// that already exists (a config, or a CRUD resource whose declared identity is the
+// reserved AdoptIdentity). It reads the current object during plan and copies its
+// values into the plan's unset (unknown) Optional+Computed attributes, so the plan
+// shows a real delta instead of "(known after apply)". It acts only on create (no
+// prior state — updates already use UseStateForUnknown) and only when the object
+// actually exists (a genuine create of a new custom identity, or an unconfigured
+// provider during validate, is left untouched). Filling the plan here is display
+// only: the write still gates on config, so unset fields are not sent.
+func genModifyPlan(b *bytes.Buffer, r Resource, recv, model, svc, pkg string) {
+	fmt.Fprintf(b, "func (r *%s) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {\n", recv)
+	fmt.Fprintf(b, "\tif req.Plan.Raw.IsNull() || !req.State.Raw.IsNull() || r.client == nil {\n\t\treturn\n\t}\n")
+	fmt.Fprintf(b, "\tvar plan %s\n", model)
+	fmt.Fprintf(b, "\tresp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)\n")
+	fmt.Fprintf(b, "\tif resp.Diagnostics.HasError() {\n\t\treturn\n\t}\n")
+	if r.Config && r.Singleton {
+		fmt.Fprintf(b, "\tres, err := %s.%s(ctx, %s.%s{})\n", svc, r.Read.Method, pkg, r.Read.Params)
+	} else {
+		fmt.Fprintf(b, "\tidentity := plan.Identity.ValueString()\n")
+		if r.IdentityIsName && r.AdoptIdentity != "" {
+			// Only the reserved (Global) identity pre-exists; a custom identity is a
+			// genuine create and must keep "(known after apply)".
+			fmt.Fprintf(b, "\tif identity != %q {\n\t\treturn\n\t}\n", r.AdoptIdentity)
+		} else {
+			fmt.Fprintf(b, "\tif identity == \"\" {\n\t\treturn\n\t}\n")
+		}
+		idf := r.Read.IdentityField
+		if idf == "" {
+			idf = "Identity"
+		}
+		fmt.Fprintf(b, "\tres, err := %s.%s(ctx, %s.%s{%s: identity})\n", svc, r.Read.Method, pkg, r.Read.Params, idf)
+	}
+	fmt.Fprintf(b, "\tif err != nil {\n\t\treturn\n\t}\n")
+	fmt.Fprintf(b, "\tobj := firstObject(res.Value)\n")
+	fmt.Fprintf(b, "\tif obj == nil {\n\t\treturn\n\t}\n")
+	fmt.Fprintf(b, "\tvar cur %s\n", model)
+	fmt.Fprintf(b, "\tread%s(ctx, obj, &cur)\n", r.Noun)
+	fmt.Fprintf(b, "\tif plan.ID.IsUnknown() {\n\t\tplan.ID = cur.ID\n\t}\n")
+	fmt.Fprintf(b, "\tif plan.Identity.IsUnknown() {\n\t\tplan.Identity = cur.Identity\n\t}\n")
+	for _, a := range r.Attributes {
+		if a.WriteOnly {
+			continue // never read back — keep configured/unknown
+		}
+		fmt.Fprintf(b, "\tif plan.%s.IsUnknown() {\n\t\tplan.%s = cur.%s\n\t}\n", a.Field, a.Field, a.Field)
+	}
+	fmt.Fprintf(b, "\tresp.Diagnostics.Append(resp.Plan.Set(ctx, &plan)...)\n")
+	fmt.Fprintf(b, "}\n\n")
+}
+
 // genConfigCreate emits Create for a Get+Set config resource: it adopts the
 // existing config by applying Set with the configured settings, then reads.
 func genConfigCreate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg string) {
@@ -243,6 +361,12 @@ func genConfigCreate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, 
 	fmt.Fprintf(b, "\tvar plan %s\n", model)
 	fmt.Fprintf(b, "\tresp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)\n")
 	fmt.Fprintf(b, "\tif resp.Diagnostics.HasError() {\n\t\treturn\n\t}\n")
+	if r.SparseWrite {
+		// Send only what the operator configured, not the ModifyPlan-filled plan.
+		fmt.Fprintf(b, "\tvar config %s\n", model)
+		fmt.Fprintf(b, "\tresp.Diagnostics.Append(req.Config.Get(ctx, &config)...)\n")
+		fmt.Fprintf(b, "\tif resp.Diagnostics.HasError() {\n\t\treturn\n\t}\n")
+	}
 	fmt.Fprintf(b, "\tsp := %s.%s{}\n", pkg, r.Update.Params)
 	if r.Update.IdentityField != "" {
 		fmt.Fprintf(b, "\tsp.%s = plan.Identity.ValueString()\n", r.Update.IdentityField)
@@ -252,12 +376,14 @@ func genConfigCreate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, 
 			continue
 		}
 		switch {
+		case a.Object && r.SparseWrite:
+			fmt.Fprintf(b, "\tif v := config.%s.ValueString(); v != \"\" {\n\t\tsp.%s = objectParam(v)\n\t}\n", a.Field, a.Field)
 		case a.Object:
-			fmt.Fprintf(b, "\tif v := plan.%s.ValueString(); v != \"\" {\n\t\tsp.%s = v\n\t}\n", a.Field, a.Field)
+			fmt.Fprintf(b, "\tif v := plan.%s.ValueString(); v != \"\" {\n\t\tsp.%s = objectParam(v)\n\t}\n", a.Field, a.Field)
 		case r.SparseWrite:
-			// Adopt-create with no prior state: send only configured fields (omit
-			// the unknown Optional+Computed ones) so we don't force-set settings.
-			fmt.Fprintf(b, "\tif !plan.%s.IsUnknown() && !plan.%s.IsNull() {\n\t\tsp.%s = %s\n\t}\n", a.Field, a.Field, a.Field, a.planValue())
+			// Adopt-create: send only configured fields (config, not the possibly
+			// ModifyPlan-filled plan) so we don't force-set unmanaged settings.
+			fmt.Fprintf(b, "\tif !config.%s.IsNull() {\n\t\tsp.%s = %s\n\t}\n", a.Field, a.Field, a.planValue())
 		default:
 			fmt.Fprintf(b, "\tsp.%s = %s\n", a.Field, a.planValue())
 		}
@@ -344,7 +470,7 @@ func genUpdate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 		}
 		switch {
 		case a.Object:
-			fmt.Fprintf(b, "\tif v := plan.%s.ValueString(); v != \"\" {\n\t\tsp.%s = v\n\t}\n", a.Field, a.Field)
+			fmt.Fprintf(b, "\tif v := plan.%s.ValueString(); v != \"\" {\n\t\tsp.%s = objectParam(v)\n\t}\n", a.Field, a.Field)
 		case r.SparseWrite:
 			// Sparse update: send only fields that changed, so we don't re-set
 			// unchanged (and possibly permission-gated) settings on every apply —
@@ -357,10 +483,13 @@ func genUpdate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 	fmt.Fprintf(b, "\tif resp.Diagnostics.HasError() {\n\t\treturn\n\t}\n")
 	fmt.Fprintf(b, "\tif _, err := %s.%s(ctx, sp); err != nil {\n\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\treturn\n\t}\n", svc, r.Update.Method, r.cmdlet("Set")+" failed")
 	fmt.Fprintf(b, "\tcfg := plan\n")
-	// reflected predicate over string attributes that were updated.
+	// reflected predicate over plain string attributes that were updated. Object
+	// (System.Object/JSON) attributes are excluded: they read back via getObjectJSON
+	// (not getString) and the API normalizes them (key case, added fields), so a
+	// getString-based reflection would never match and would stall the refresh.
 	fmt.Fprintf(b, "\treflected := reconcile.ReflectsFields(map[string]types.String{\n")
 	for _, a := range r.Attributes {
-		if a.InUpdate && a.Type == TypeString {
+		if a.InUpdate && a.Type == TypeString && !a.Object {
 			fmt.Fprintf(b, "\t\t%q: cfg.%s,\n", a.APIName, a.Field)
 		}
 	}
@@ -383,6 +512,14 @@ func genDelete(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 	fmt.Fprintf(b, "\tvar state %s\n", model)
 	fmt.Fprintf(b, "\tresp.Diagnostics.Append(req.State.Get(ctx, &state)...)\n")
 	fmt.Fprintf(b, "\tif resp.Diagnostics.HasError() {\n\t\treturn\n\t}\n")
+	// Adopted singleton (e.g. "Global"): a reserved built-in that cannot be
+	// removed, so drop it from state with a warning rather than calling Remove.
+	if r.AdoptIdentity != "" {
+		fmt.Fprintf(b, "\tif r.identityOf(state) == %q {\n", r.AdoptIdentity)
+		fmt.Fprintf(b, "\t\tresp.Diagnostics.AddWarning(%q, %q)\n\t\treturn\n\t}\n",
+			r.Noun+" "+r.AdoptIdentity+" not deleted",
+			"The "+r.AdoptIdentity+" "+r.Noun+" is a built-in tenant singleton that cannot be removed. It has been dropped from Terraform state but remains unchanged in the tenant.")
+	}
 	fmt.Fprintf(b, "\tif _, err := %s.%s(ctx, %s.%s{%s: r.identityOf(state)}); err != nil {\n", svc, r.Delete.Method, pkg, r.Delete.Params, r.Delete.IdentityField)
 	fmt.Fprintf(b, "\t\tif !isNotFound(err) {\n\t\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\t}\n\t}\n}\n\n", r.cmdlet("Remove")+" failed")
 }
@@ -455,6 +592,9 @@ func genAssignmentResource(cfg Config, r Resource) ([]byte, error) {
 	fmt.Fprintf(&b, "\t_ resource.Resource = &%s{}\n", recv)
 	fmt.Fprintf(&b, "\t_ resource.ResourceWithConfigure = &%s{}\n", recv)
 	fmt.Fprintf(&b, "\t_ resource.ResourceWithImportState = &%s{}\n", recv)
+	if r.adoptsExisting() {
+		fmt.Fprintf(&b, "\t_ resource.ResourceWithModifyPlan = &%s{}\n", recv)
+	}
 	fmt.Fprintf(&b, ")\n\n")
 	fmt.Fprintf(&b, "type %s struct{ client *clients.Client }\n\n", recv)
 	fmt.Fprintf(&b, "// %s manages the per-user assignment of a %s instance (%s).\n",

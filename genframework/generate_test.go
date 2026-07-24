@@ -155,11 +155,15 @@ func TestSparseWriteOmitsUnsetAndUnchanged(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		// create: empty struct, guarded assignment (not a struct-literal field)
+		// create: empty struct, guarded assignment (not a struct-literal field).
+		// The guard is on config (what the operator wrote) so a ModifyPlan-filled
+		// plan value is not mistaken for a configured one; the value is still taken
+		// from plan (== config for set attributes).
 		"cs.NewCsTeamsMeetingPolicyParams{}",
-		"if !plan.AllowMeetNow.IsUnknown() && !plan.AllowMeetNow.IsNull() {",
+		"resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)",
+		"if !config.AllowMeetNow.IsNull() {",
 		"p.AllowMeetNow = plan.AllowMeetNow.ValueBoolPointer()",
-		"if !plan.AutoAdmittedUsers.IsUnknown() && !plan.AutoAdmittedUsers.IsNull() {",
+		"if !config.AutoAdmittedUsers.IsNull() {",
 		// update: only send changed
 		"if !plan.AllowMeetNow.Equal(state.AllowMeetNow) {",
 		"if !plan.AutoAdmittedUsers.Equal(state.AutoAdmittedUsers) {",
@@ -176,6 +180,58 @@ func TestSparseWriteOmitsUnsetAndUnchanged(t *testing.T) {
 	// matches the unconditional single-tab statement we must not emit.
 	if strings.Contains(res, "\n\tsp.AllowMeetNow = plan.AllowMeetNow.ValueBoolPointer()\n") {
 		t.Error("SparseWrite update must guard fields on Equal(state), not assign unconditionally")
+	}
+}
+
+// TestAdoptIdentityGeneratesModifyPlanAndAdoptBranch verifies that an
+// IdentityIsName resource with a reserved AdoptIdentity emits (a) a Create adopt
+// short-circuit that applies Set instead of New, (b) a Delete that drops the
+// reserved identity from state instead of removing it, and (c) ModifyPlan that
+// reads the object during plan to fill unset attributes for a real delta.
+func TestAdoptIdentityGeneratesModifyPlanAndAdoptBranch(t *testing.T) {
+	cfg := Config{
+		Package: "provider", ClientsImport: "example.com/clients", ClientField: "CS",
+		BindingsImport: "github.com/terraprovider/go-teams/cs", BindingsPkg: "cs",
+	}
+	r := Resource{
+		Noun: "MeetingPolicy", TFName: "meeting_policy", Description: "A meeting policy.",
+		IdentityIsName: true, SparseWrite: true, AdoptIdentity: "Global",
+		Attributes: []Attribute{
+			{TFName: "allow_meet_now", Field: "AllowMeetNow", APIName: "AllowMeetNow", Type: TypeBool, Computed: true, PointerParam: true, Description: "Allow meet now.", InCreate: true, InUpdate: true},
+		},
+		Create: Op{Method: "NewCsTeamsMeetingPolicy", Params: "NewCsTeamsMeetingPolicyParams", IdentityField: "Identity"},
+		Read:   Op{Method: "GetCsTeamsMeetingPolicy", Params: "GetCsTeamsMeetingPolicyParams", IdentityField: "Identity"},
+		Update: Op{Method: "SetCsTeamsMeetingPolicy", Params: "SetCsTeamsMeetingPolicyParams", IdentityField: "Identity"},
+		Delete: Op{Method: "RemoveCsTeamsMeetingPolicy", Params: "RemoveCsTeamsMeetingPolicyParams", IdentityField: "Identity"},
+	}
+	files, err := Generate(cfg, []Resource{r})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	var res string
+	for _, f := range files {
+		if f.Name == "meeting_policy_resource.go" {
+			res = string(f.Content)
+		}
+	}
+	for _, want := range []string{
+		"resource.ResourceWithModifyPlan", // interface assertion (gofmt aligns the =)
+		// Create adopt short-circuit: Set, not New, for the reserved identity.
+		"if plan.Identity.ValueString() == \"Global\" {",
+		"r.client.CS.SetCsTeamsMeetingPolicy(ctx, sp)",
+		// Delete drops the reserved identity from state instead of Remove.
+		"if r.identityOf(state) == \"Global\" {",
+		"MeetingPolicy Global not deleted",
+		// ModifyPlan reads on create and fills unknowns from the current object.
+		"func (r *meetingPolicyResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {",
+		"if identity != \"Global\" {",
+		"read" + r.Noun + "(ctx, obj, &cur)",
+		"if plan.AllowMeetNow.IsUnknown() {",
+		"plan.AllowMeetNow = cur.AllowMeetNow",
+	} {
+		if !strings.Contains(res, want) {
+			t.Errorf("adopt/modifyplan source missing %q", want)
+		}
 	}
 }
 

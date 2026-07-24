@@ -134,6 +134,14 @@ type Resource struct {
 	// Required, RequiresReplace input and is passed to Create via
 	// Create.IdentityField (default "Identity").
 	IdentityIsName bool
+	// AdoptIdentity, when non-empty, names a reserved identity that is a
+	// pre-existing tenant singleton which cannot be created or removed (the Teams
+	// per-policy-type "Global" default). For an IdentityIsName resource whose
+	// declared identity equals AdoptIdentity, Create adopts the existing object by
+	// applying Set instead of New (so no manual `terraform import` is needed), and
+	// Delete drops it from state instead of calling Remove. Empty disables it — so
+	// custom instances (identity != AdoptIdentity) keep normal New/Remove CRUD.
+	AdoptIdentity string
 	// Plural, when true, additionally emits a plural ("list") data source that
 	// calls Get-<Noun> with no key and returns every object as a read-only list
 	// of nested objects (attribute named after the pluralised TFName, e.g.

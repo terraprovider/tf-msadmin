@@ -79,7 +79,17 @@ func (r Resource) recv() string     { return lowerFirst(r.Noun) + "Resource" }
 func (r Resource) model() string    { return lowerFirst(r.Noun) + "Model" }
 func (r Resource) ctor() string     { return "New" + r.Noun + "Resource" }
 func (r Resource) hasMembers() bool { return r.Members != nil }
-func (r Resource) hasSet() bool     { return r.hasType(TypeStringSet) || r.Members != nil }
+
+// adoptsExisting reports whether the resource, on create, manages an object that
+// already exists — a config, or a CRUD resource with a reserved AdoptIdentity like
+// "Global". Such resources emit ModifyPlan (read the object during plan to show a
+// real delta instead of "(known after apply)") and gate their sparse write on
+// config rather than plan, so ModifyPlan-filled values are not sent. Only
+// meaningful for SparseWrite providers (Teams); others keep full re-send semantics.
+func (r Resource) adoptsExisting() bool {
+	return r.SparseWrite && (r.Config || (r.IdentityIsName && r.AdoptIdentity != ""))
+}
+func (r Resource) hasSet() bool { return r.hasType(TypeStringSet) || r.Members != nil }
 
 // plural* name the emitted "list" data source, which shares the singular's
 // element model and read<Noun> mapper.
@@ -337,6 +347,11 @@ func (a Attribute) planValue() string {
 
 // readAssign renders the readInto assignment.
 func (a Attribute) readAssign() string {
+	if a.Object {
+		// System.Object read-back is a structured value (array/object); serialize it
+		// to a JSON string so it round-trips against a jsonencode() config.
+		return fmt.Sprintf("m.%s = types.StringValue(getObjectJSON(obj, %q))", a.Field, a.APIName)
+	}
 	switch a.Type {
 	case TypeBool:
 		return fmt.Sprintf("m.%s = types.BoolValue(getBool(obj, %q))", a.Field, a.APIName)
