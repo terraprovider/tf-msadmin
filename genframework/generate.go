@@ -30,6 +30,11 @@ func Generate(cfg Config, resources []Resource) ([]File, error) {
 			}
 			files = append(files, File{Name: r.TFName + "_resource.go", Content: src})
 		}
+		if r.Assignment {
+			// A per-user assignment has no object identity to read back — no data
+			// source is emitted (and none is registered, see genRegistration).
+			continue
+		}
 		ds, err := genDataSource(cfg, r)
 		if err != nil {
 			return nil, fmt.Errorf("%s data source: %w", r.Noun, err)

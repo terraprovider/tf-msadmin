@@ -144,6 +144,35 @@ type Resource struct {
 	// meant to touch. Required for the Teams surface; leave false for providers
 	// (Exchange) whose Set cmdlets tolerate full re-sends.
 	SparseWrite bool
+
+	// Assignment marks a per-user policy-assignment resource: it manages the grant
+	// of a named policy instance to a single user (Grant-Cs<Type>Policy) rather
+	// than an object with its own New/Get/Set/Remove lifecycle. The generated
+	// resource has just two inputs — `user` (Required, RequiresReplace) and
+	// `policy_name` (Required, updatable):
+	//
+	//   - Create/Update call the grant op (Create.Method/Params) with the user in
+	//     Create.IdentityField (default "Identity") and the instance name in the
+	//     PolicyName param, then poll the read until the assignment is effective
+	//     (grants are asynchronous — see AssignmentPolicyType).
+	//   - Delete calls the same grant op with PolicyName="" (unassign → the user
+	//     reverts to the tenant-global default).
+	//   - Read derives the effective assignment via AssignmentUserRead; an empty
+	//     result (no explicit assignment / global) removes the resource from state.
+	//
+	// Only Create (the grant Op), AssignmentPolicyType and AssignmentUserRead are
+	// consulted; Attributes/Read/Update/Delete/Members and the other object-mode
+	// flags are ignored. No data source is emitted for an assignment resource.
+	Assignment bool
+	// AssignmentPolicyType is the API policy-type discriminator the grant targets
+	// and the read filters on, e.g. "TeamsMeetingPolicy". Required when Assignment
+	// is true.
+	AssignmentPolicyType string
+	// AssignmentUserRead names the read helper on the bindings service that returns
+	// a user's effective assignment for AssignmentPolicyType, with signature
+	// func(ctx context.Context, user, policyType string) (string, error) (empty ⇒
+	// no explicit assignment). Defaults to "EffectiveUserPolicy" when empty.
+	AssignmentUserRead string
 }
 
 // Config carries the provider-level constants shared by all generated files and

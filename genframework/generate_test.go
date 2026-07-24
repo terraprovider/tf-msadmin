@@ -240,6 +240,92 @@ func TestIdentityIsName(t *testing.T) {
 	}
 }
 
+// TestAssignmentResource covers the per-user policy-assignment mode
+// (Resource.Assignment): a two-field resource (user + policy_name) backed by the
+// Grant-Cs<Type>Policy user grant, with an async poll-until-effective on
+// create/update, an unassign (PolicyName="") on delete, and an effective-
+// assignment read that drops the resource on drift.
+func TestAssignmentResource(t *testing.T) {
+	cfg := Config{
+		Package: "provider", ClientsImport: "example.com/clients", ClientField: "CS",
+		BindingsImport: "github.com/terraprovider/go-teams/cs", BindingsPkg: "cs",
+	}
+	r := Resource{
+		Noun: "TeamsMeetingPolicyAssignment", TFName: "teams_meeting_policy_assignment",
+		Description:          "Assigns a TeamsMeetingPolicy instance to a user.",
+		Assignment:           true,
+		AssignmentPolicyType: "TeamsMeetingPolicy",
+		AssignmentUserRead:   "EffectiveUserPolicy",
+		Create:               Op{Method: "GrantCsTeamsMeetingPolicy", Params: "GrantCsTeamsMeetingPolicyParams", IdentityField: "Identity"},
+	}
+	files, err := Generate(cfg, []Resource{r})
+	if err != nil {
+		t.Fatalf("Generate: %v", err) // format.Source failure surfaces bad source
+	}
+
+	// No data source file (and no plural) is emitted for an assignment resource.
+	var res, reg string
+	for _, f := range files {
+		switch f.Name {
+		case "teams_meeting_policy_assignment_resource.go":
+			res = string(f.Content)
+		case "zz_generated_resources.go":
+			reg = string(f.Content)
+		case "teams_meeting_policy_assignment_data_source.go":
+			t.Errorf("assignment resource must not emit a data source file")
+		}
+	}
+	if res == "" {
+		t.Fatal("missing generated assignment resource file")
+	}
+	if len(files) != 2 { // resource + registration only
+		names := make([]string, len(files))
+		for i, f := range files {
+			names[i] = f.Name
+		}
+		t.Fatalf("want 2 files (resource+registration), got %d: %v", len(files), names)
+	}
+
+	// Registration wires the resource constructor but NOT a data source constructor.
+	if !strings.Contains(reg, "NewTeamsMeetingPolicyAssignmentResource,") {
+		t.Error("registration missing the assignment resource constructor")
+	}
+	if strings.Contains(reg, "NewTeamsMeetingPolicyAssignmentDataSource") {
+		t.Error("registration must not reference a data source for an assignment resource")
+	}
+
+	for _, want := range []string{
+		"func NewTeamsMeetingPolicyAssignmentResource() resource.Resource",
+		"type teamsMeetingPolicyAssignmentModel struct",
+		`tfsdk:"user"`,        // gofmt pads the field/tag columns, so match the tag
+		`tfsdk:"policy_name"`, // (not "<Field> types.String" with fixed spacing)
+		`resp.TypeName = req.ProviderTypeName + "_teams_meeting_policy_assignment"`,
+		// schema: user Required + RequiresReplace; policy_name Required (gofmt pads
+		// the map-key column, so anchor on the value from `schema.` onward).
+		`schema.StringAttribute{Required: true, Description: "User the policy is assigned to`,
+		"stringplanmodifier.RequiresReplace()",
+		`schema.StringAttribute{Required: true, Description: "Name of the TeamsMeetingPolicy instance to assign to the user."}`,
+		// Create: grant with user in the identity field + PolicyName, then poll.
+		"cs.GrantCsTeamsMeetingPolicyParams{Identity: user, PolicyName: name}",
+		"r.client.CS.GrantCsTeamsMeetingPolicy(ctx,",
+		"r.waitAssigned(ctx, user, name, &resp.Diagnostics)",
+		// Read: effective assignment; drift removes the resource.
+		`r.client.CS.EffectiveUserPolicy(ctx, user, "TeamsMeetingPolicy")`,
+		"resp.State.RemoveResource(ctx)",
+		// Delete: unassign via empty PolicyName.
+		`cs.GrantCsTeamsMeetingPolicyParams{Identity: state.User.ValueString(), PolicyName: ""}`,
+		// Async poll uses the shared consistency/resourcex helpers with a larger budget.
+		"resourcex.LoadUntil(ctx, consistency.Config{Attempts: 20, Delay: 4 * time.Second}",
+		"func(got string) bool { return got == want }",
+		// Import keys id + user off the import id.
+		`path.Root("user"), req.ID`,
+	} {
+		if !strings.Contains(res, want) {
+			t.Errorf("assignment source missing %q", want)
+		}
+	}
+}
+
 // TestInt64Attribute covers the TypeInt path (int / *int64 bindings): int
 // attributes become types.Int64 with a schema.Int64Attribute, the int64
 // planmodifier import, pointer accessors for tri-state params, getInt read-back,
