@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/hashicorp/terraform-plugin-framework v1.19.0
-	github.com/terraprovider/go-msadmin v0.2.0
+	github.com/terraprovider/go-msadmin v0.3.0
 )
 
 require (
