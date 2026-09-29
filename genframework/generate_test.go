@@ -67,7 +67,9 @@ func TestGenerateRoleGroupIsValidGo(t *testing.T) {
 		"func NewRoleGroupResource() resource.Resource",
 		"type roleGroupModel struct",
 		"exo.NewRoleGroupParams{",
-		"r.client.EXO.NewRoleGroup(ctx, p)",
+		// main writes ride out replication lag of referenced objects (not-found)
+		"resourcex.RetryWriteCall(ctx, consistency.Config{}, r.client.EXO.NewRoleGroup, p, isNotFound)",
+		"resourcex.RetryWriteCall(ctx, consistency.Config{}, r.client.EXO.SetRoleGroup, sp, isNotFound)",
 		"resourcex.LoadUntil(ctx, consistency.Config{}, get, reflected)",
 		"reconcile.KeepStr(cfg.Description, read.Description)",
 		"stringplanmodifier.RequiresReplace()", // name replace
@@ -77,6 +79,10 @@ func TestGenerateRoleGroupIsValidGo(t *testing.T) {
 		if !strings.Contains(res, want) {
 			t.Errorf("generated source missing %q", want)
 		}
+	}
+	// Delete must stay a direct call: not-found there means "already gone".
+	if !strings.Contains(res, "r.client.EXO.RemoveRoleGroup(ctx, exo.RemoveRoleGroupParams{") {
+		t.Error("Delete must call Remove directly, without the not-found write retry")
 	}
 }
 
@@ -218,7 +224,7 @@ func TestAdoptIdentityGeneratesModifyPlanAndAdoptBranch(t *testing.T) {
 		"resource.ResourceWithModifyPlan", // interface assertion (gofmt aligns the =)
 		// Create adopt short-circuit: Set, not New, for the reserved identity.
 		"if plan.Identity.ValueString() == \"Global\" {",
-		"r.client.CS.SetCsTeamsMeetingPolicy(ctx, sp)",
+		"resourcex.RetryWriteCall(ctx, consistency.Config{}, r.client.CS.SetCsTeamsMeetingPolicy, sp, isNotFound)",
 		// Delete drops the reserved identity from state instead of Remove.
 		"if r.identityOf(state) == \"Global\" {",
 		"MeetingPolicy Global not deleted",

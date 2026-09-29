@@ -75,3 +75,41 @@ func TestLoadUntilFatalError(t *testing.T) {
 		t.Fatalf("present=%v err=%v (want fatal)", present, err)
 	}
 }
+
+var errNotFound = errors.New("couldn't be found")
+
+func isNF(err error) bool { return errors.Is(err, errNotFound) }
+
+func TestRetryWriteCallRidesOutNotFound(t *testing.T) {
+	n := 0
+	call := func(_ context.Context, p string) (string, error) {
+		n++
+		if n < 3 {
+			return "", errNotFound
+		}
+		return "created:" + p, nil
+	}
+	v, err := RetryWriteCall(context.Background(), fastCfg, call, "x", isNF)
+	if err != nil || v != "created:x" || n != 3 {
+		t.Fatalf("v=%q err=%v n=%d", v, err, n)
+	}
+}
+
+func TestRetryWriteCallFatalNotRetried(t *testing.T) {
+	boom := errors.New("boom")
+	n := 0
+	call := func(context.Context, string) (string, error) { n++; return "", boom }
+	_, err := RetryWriteCall(context.Background(), fastCfg, call, "x", isNF)
+	if !errors.Is(err, boom) || n != 1 {
+		t.Fatalf("err=%v n=%d (want fatal after 1 call)", err, n)
+	}
+}
+
+func TestRetryWriteCallExhausted(t *testing.T) {
+	n := 0
+	call := func(context.Context, string) (string, error) { n++; return "", errNotFound }
+	_, err := RetryWriteCall(context.Background(), fastCfg, call, "x", isNF)
+	if !errors.Is(err, errNotFound) || n != fastCfg.Attempts {
+		t.Fatalf("err=%v n=%d (want last not-found after %d calls)", err, n, fastCfg.Attempts)
+	}
+}
