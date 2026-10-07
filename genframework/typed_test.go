@@ -126,7 +126,12 @@ func TestDeltaClearsListOnSet(t *testing.T) {
 	wantAll(t, src,
 		// Update re-reads lazily, at most once.
 		"current := func() *hostedContentFilterPolicyModel {",
-		"if !r.refresh(ctx, id, &m, &resp.Diagnostics, nil) {",
+		"if r.refresh(ctx, id, &m, &resp.Diagnostics, nil) {",
+		// A failed read (incl. not found, which refresh reports without a
+		// diagnostic) aborts the Set instead of silently skipping the delta, and
+		// is cached so several cleared lists share one read.
+		"} else if !resp.Diagnostics.HasError() {\n\t\t\t\tresp.Diagnostics.AddError(\"Get-HostedContentFilterPolicy failed\"",
+		"if !curRead {\n\t\t\tcurRead = true",
 		// Non-empty is a full replace; a changed-to-empty set removes the server values.
 		"if v := toStringSlice(ctx, plan.AllowList, &resp.Diagnostics); len(v) > 0 {\n\t\t\tsp.AllowList = v\n\t\t} else {\n\t\t\tif !plan.AllowList.Equal(state.AllowList) {",
 		"sp.AllowListDelta = listRemoveDelta(rm)",
@@ -141,12 +146,12 @@ func TestDeltaConfigCreateAndAdopt(t *testing.T) {
 	cfg, r := deltaFixture()
 	r.Config, r.Singleton, r.SparseWrite = true, true, true
 	src := genOne(t, cfg, r)
-	wantAll(t, src, `if !r.refresh(ctx, "", &m, &resp.Diagnostics, nil) {`, "sp.AllowListDelta = listRemoveDelta(rm)")
+	wantAll(t, src, `if r.refresh(ctx, "", &m, &resp.Diagnostics, nil) {`, "sp.AllowListDelta = listRemoveDelta(rm)")
 
 	cfg, r = deltaFixture()
 	r.IdentityIsName, r.AdoptIdentity, r.SparseWrite = true, "Global", true
 	src = genOne(t, cfg, r)
-	wantAll(t, src, "if !r.refresh(ctx, plan.Identity.ValueString(), &m, &resp.Diagnostics, nil) {", "sp.AllowListDelta = listRemoveDelta(rm)")
+	wantAll(t, src, "if r.refresh(ctx, plan.Identity.ValueString(), &m, &resp.Diagnostics, nil) {", "sp.AllowListDelta = listRemoveDelta(rm)")
 }
 
 func TestNoDeltaNoCurrent(t *testing.T) {

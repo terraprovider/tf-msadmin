@@ -92,19 +92,27 @@ func (r Resource) hasUpdateDelta() bool {
 }
 
 // genCurrent emits, before a Set-* params build, a lazily evaluated current()
-// that re-reads the object (at most once) so a cleared Delta list can send
-// Remove = the server's current values. It returns nil when the object cannot
-// be read. Nothing is emitted when no attribute uses a delta.
+// that re-reads the object at most once, so a cleared Delta list can send
+// Remove = the server's current values. A failed read (including "not found"
+// after the retry budget, which refresh reports without a diagnostic) adds an
+// error, so the caller's HasError check aborts the Set: otherwise the delta
+// would be skipped silently and reconcile would record the configured empty
+// list while the server list is unchanged. The outcome is cached, so several
+// cleared lists share one read. Nothing is emitted when no attribute uses a
+// delta.
 func genCurrent(b *bytes.Buffer, r Resource, idExpr string) {
 	if !r.hasUpdateDelta() {
 		return
 	}
 	model := r.model()
 	fmt.Fprintf(b, "\tvar cur *%s\n", model)
+	fmt.Fprintf(b, "\tcurRead := false\n")
 	fmt.Fprintf(b, "\tcurrent := func() *%s {\n", model)
-	fmt.Fprintf(b, "\t\tif cur == nil {\n\t\t\tvar m %s\n", model)
-	fmt.Fprintf(b, "\t\t\tif !r.refresh(ctx, %s, &m, &resp.Diagnostics, nil) {\n\t\t\t\treturn nil\n\t\t\t}\n", idExpr)
-	fmt.Fprintf(b, "\t\t\tcur = &m\n\t\t}\n\t\treturn cur\n\t}\n")
+	fmt.Fprintf(b, "\t\tif !curRead {\n\t\t\tcurRead = true\n\t\t\tvar m %s\n", model)
+	fmt.Fprintf(b, "\t\t\tif r.refresh(ctx, %s, &m, &resp.Diagnostics, nil) {\n\t\t\t\tcur = &m\n", idExpr)
+	fmt.Fprintf(b, "\t\t\t} else if !resp.Diagnostics.HasError() {\n\t\t\t\tresp.Diagnostics.AddError(%q, %q)\n\t\t\t}\n",
+		r.cmdlet("Get")+" failed", "the object could not be read to determine the list values to remove; nothing was changed")
+	fmt.Fprintf(b, "\t\t}\n\t\treturn cur\n\t}\n")
 }
 
 // identityStable reports whether the computed identity cannot change across an
