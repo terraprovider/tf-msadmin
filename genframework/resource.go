@@ -488,6 +488,10 @@ func genUpdate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 			continue
 		}
 		switch {
+		case a.Object && r.SparseWrite:
+			// Sparse update: re-send an Object (enum, Unlimited, ...) only when it
+			// changed. Clearing to "" is still not sendable.
+			fmt.Fprintf(b, "\tif !plan.%s.Equal(state.%s) {\n\t\tif v := plan.%s.ValueString(); v != \"\" {\n\t\t\tsp.%s = objectParam(v)\n\t\t}\n\t}\n", a.Field, a.Field, a.Field, a.Field)
 		case a.Object:
 			fmt.Fprintf(b, "\tif v := plan.%s.ValueString(); v != \"\" {\n\t\tsp.%s = objectParam(v)\n\t}\n", a.Field, a.Field)
 		case r.SparseWrite:
