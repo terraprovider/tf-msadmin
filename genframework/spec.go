@@ -65,6 +65,15 @@ type Attribute struct {
 	// change (update); set it together with PointerParam so a read-back false / 0
 	// is not re-sent on every update.
 	PointerParam bool
+	// Delta marks a TypeStringSet whose Set params also carry a companion
+	// <Field>Delta field (go-exoscc: Set-* params that are System.Object with docs
+	// type MultiValuedProperty). These APIs ignore an empty list, so clearing needs
+	// a Remove delta. When the planned set is empty, a Set-* write re-reads the
+	// object and sends <Field>Delta = listRemoveDelta(<current values>). It reads
+	// the server values rather than state, which holds the configured (not
+	// normalized) strings. A non-empty set is still sent as a full replace, and
+	// New-* never sends a delta.
+	Delta bool
 }
 
 // Op is a client operation binding: the generated code calls
@@ -226,5 +235,7 @@ type Config struct {
 	//   toStringSlice(context.Context, types.Set, *diag.Diagnostics) []string
 	//     (must return nil for a null or unknown set)
 	//   stringSetValue(context.Context, []string) types.Set
+	//   listRemoveDelta([]string) <delta>                (when any Delta attribute;
+	//     returns the bindings' delta value, e.g. &adminapi.StringDelta{Remove: v})
 	// and a *clients.Client passed via ResourceData.
 }

@@ -113,3 +113,53 @@ func TestObjectRequiresString(t *testing.T) {
 		t.Fatalf("want Object/TypeString error, got %v", err)
 	}
 }
+
+func deltaFixture() (Config, Resource) {
+	cfg, r := typedFixture()
+	r.Attributes[3].Delta = true // allow_list
+	return cfg, r
+}
+
+func TestDeltaClearsListOnSet(t *testing.T) {
+	cfg, r := deltaFixture()
+	src := genOne(t, cfg, r)
+	wantAll(t, src,
+		// Update re-reads lazily, at most once.
+		"current := func() *hostedContentFilterPolicyModel {",
+		"if !r.refresh(ctx, id, &m, &resp.Diagnostics, nil) {",
+		// Non-empty is a full replace; a changed-to-empty set removes the server values.
+		"if v := toStringSlice(ctx, plan.AllowList, &resp.Diagnostics); len(v) > 0 {\n\t\t\tsp.AllowList = v\n\t\t} else {\n\t\t\tif !plan.AllowList.Equal(state.AllowList) {",
+		"sp.AllowListDelta = listRemoveDelta(rm)",
+	)
+	// New-* never sends a delta.
+	if strings.Contains(src, "\tp.AllowListDelta") {
+		t.Errorf("delta emitted on New-*")
+	}
+}
+
+func TestDeltaConfigCreateAndAdopt(t *testing.T) {
+	cfg, r := deltaFixture()
+	r.Config, r.Singleton, r.SparseWrite = true, true, true
+	src := genOne(t, cfg, r)
+	wantAll(t, src, `if !r.refresh(ctx, "", &m, &resp.Diagnostics, nil) {`, "sp.AllowListDelta = listRemoveDelta(rm)")
+
+	cfg, r = deltaFixture()
+	r.IdentityIsName, r.AdoptIdentity, r.SparseWrite = true, "Global", true
+	src = genOne(t, cfg, r)
+	wantAll(t, src, "if !r.refresh(ctx, plan.Identity.ValueString(), &m, &resp.Diagnostics, nil) {", "sp.AllowListDelta = listRemoveDelta(rm)")
+}
+
+func TestNoDeltaNoCurrent(t *testing.T) {
+	cfg, r := typedFixture()
+	if src := genOne(t, cfg, r); strings.Contains(src, "current()") {
+		t.Errorf("current() emitted without a Delta attribute")
+	}
+}
+
+func TestDeltaRequiresSet(t *testing.T) {
+	cfg, r := typedFixture()
+	r.Attributes[1].Delta = true // a bool
+	if _, err := Generate(cfg, []Resource{r}); err == nil || !strings.Contains(err.Error(), "Delta requires TypeStringSet") {
+		t.Fatalf("want Delta/TypeStringSet error, got %v", err)
+	}
+}

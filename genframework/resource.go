@@ -285,6 +285,7 @@ func genAdoptBranch(b *bytes.Buffer, r Resource, svc, pkg string) {
 	fmt.Fprintf(b, "\tif plan.Identity.ValueString() == %q {\n", r.AdoptIdentity)
 	fmt.Fprintf(b, "\t\tsp := %s.%s{}\n", pkg, r.Update.Params)
 	fmt.Fprintf(b, "\t\tsp.%s = plan.Identity.ValueString()\n", idField)
+	genCurrent(b, r, "plan.Identity.ValueString()")
 	for _, a := range r.Attributes {
 		if !a.InUpdate {
 			continue
@@ -383,6 +384,11 @@ func genConfigCreate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, 
 	if r.Update.IdentityField != "" {
 		fmt.Fprintf(b, "\tsp.%s = plan.Identity.ValueString()\n", r.Update.IdentityField)
 	}
+	if r.Singleton {
+		genCurrent(b, r, `""`)
+	} else {
+		genCurrent(b, r, "plan.Identity.ValueString()")
+	}
 	for _, a := range r.Attributes {
 		if !a.InUpdate {
 			continue
@@ -476,6 +482,7 @@ func genUpdate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 	if r.Update.IdentityField != "" {
 		fmt.Fprintf(b, "\tsp.%s = id\n", r.Update.IdentityField)
 	}
+	genCurrent(b, r, "id")
 	for _, a := range r.Attributes {
 		if !a.InUpdate {
 			continue

@@ -1,6 +1,7 @@
 package genframework
 
 import (
+	"bytes"
 	"fmt"
 	"go/format"
 	"sort"
@@ -72,8 +73,38 @@ func (r Resource) validate() error {
 		if a.Object && a.Type != TypeString {
 			return fmt.Errorf("attribute %s: Object requires TypeString", a.TFName)
 		}
+		if a.Delta && a.Type != TypeStringSet {
+			return fmt.Errorf("attribute %s: Delta requires TypeStringSet", a.TFName)
+		}
 	}
 	return nil
+}
+
+// hasUpdateDelta reports whether a Set-* write may clear a list via a Remove
+// delta, which needs the current() re-read emitted by genCurrent.
+func (r Resource) hasUpdateDelta() bool {
+	for _, a := range r.Attributes {
+		if a.Delta && a.InUpdate {
+			return true
+		}
+	}
+	return false
+}
+
+// genCurrent emits, before a Set-* params build, a lazily evaluated current()
+// that re-reads the object (at most once) so a cleared Delta list can send
+// Remove = the server's current values. It returns nil when the object cannot
+// be read. Nothing is emitted when no attribute uses a delta.
+func genCurrent(b *bytes.Buffer, r Resource, idExpr string) {
+	if !r.hasUpdateDelta() {
+		return
+	}
+	model := r.model()
+	fmt.Fprintf(b, "\tvar cur *%s\n", model)
+	fmt.Fprintf(b, "\tcurrent := func() *%s {\n", model)
+	fmt.Fprintf(b, "\t\tif cur == nil {\n\t\t\tvar m %s\n", model)
+	fmt.Fprintf(b, "\t\t\tif !r.refresh(ctx, %s, &m, &resp.Diagnostics, nil) {\n\t\t\t\treturn nil\n\t\t\t}\n", idExpr)
+	fmt.Fprintf(b, "\t\t\tcur = &m\n\t\t}\n\t\treturn cur\n\t}\n")
 }
 
 // identityStable reports whether the computed identity cannot change across an
@@ -412,10 +443,19 @@ func (a Attribute) writeStmt(pv string, site writeSite) string {
 	case a.Type == TypeStringSet:
 		known := fmt.Sprintf("!plan.%s.IsNull() && !plan.%s.IsUnknown()", f, f)
 		read := fmt.Sprintf("toStringSlice(ctx, plan.%s, &resp.Diagnostics)", f)
-		switch site {
-		case siteNew:
+		switch {
+		case site == siteNew:
 			return fmt.Sprintf("if v := %s; len(v) > 0 {\n%s.%s = v\n}\n", read, pv, f)
-		case siteUpdate:
+		case a.Delta:
+			// Set-* with a delta companion: non-empty is a full replace; empty
+			// removes the current server values (an empty list would be ignored).
+			// A full-resend update only clears when the set actually changed.
+			remove := fmt.Sprintf("if c := current(); c != nil {\nif rm := toStringSlice(ctx, c.%s, &resp.Diagnostics); len(rm) > 0 {\n%s.%sDelta = listRemoveDelta(rm)\n}\n}\n", f, pv, f)
+			if site == siteUpdate {
+				remove = fmt.Sprintf("if !plan.%s.Equal(state.%s) {\n%s}\n", f, f, remove)
+			}
+			return fmt.Sprintf("if %s {\nif v := %s; len(v) > 0 {\n%s.%s = v\n} else {\n%s}\n}\n", known, read, pv, f, remove)
+		case site == siteUpdate:
 			return fmt.Sprintf("if %s {\nif v := %s; len(v) > 0 || !plan.%s.Equal(state.%s) {\n%s.%s = append([]string{}, v...)\n}\n}\n",
 				known, read, f, f, pv, f)
 		default:
