@@ -19,7 +19,7 @@ type AttrType int
 const (
 	TypeString    AttrType = iota // types.String  <- string / *.guid
 	TypeBool                      // types.Bool    <- switch / bool
-	TypeStringSet                 // types.Set of String <- []string
+	TypeStringSet                 // types.Set of String <- []string (nil = not sent, empty = sent as [] to clear)
 	TypeInt                       // types.Int64   <- int / *int64
 )
 
@@ -54,12 +54,15 @@ type Attribute struct {
 	// "" must be distinguishable from unset. Create/update then pass
 	// ValueBoolPointer() / ValueStringPointer().
 	//
-	// NOTE: ValueBoolPointer()/ValueStringPointer() return nil only for a *null*
-	// value — for an *unknown* value (an unconfigured Optional+Computed attribute
-	// on create) they return a pointer to the zero value (&false / &""), which
-	// would be marshalled and sent. Set Resource.SparseWrite so create/update omit
-	// unknown (and, on update, unchanged) fields — otherwise every tri-state field
-	// is force-set to false, which the Teams API rejects for gated toggles.
+	// Also set it for the go-exoscc typed bindings, which bind typed (non-switch)
+	// bool and integer params as *bool / *int64 so false / 0 can be sent.
+	//
+	// ValueBoolPointer()/ValueInt64Pointer()/ValueStringPointer() return a pointer
+	// to the zero value for an *unknown* plan value (an unconfigured
+	// Optional+Computed attribute on create), so the generated write leaves a
+	// pointer field nil while its plan value is unknown. Resource.SparseWrite
+	// additionally omits fields the operator did not configure (create) or did not
+	// change (update), which the Teams API needs for permission-gated toggles.
 	PointerParam bool
 }
 
@@ -214,7 +217,11 @@ type Config struct {
 	//   getBool(map[string]any, string) bool
 	//   firstNonEmptyStr(...string) string
 	//   isNotFound(error) bool
+	//   getInt(map[string]any, string) int64              (when any TypeInt attribute)
+	//   getObjectJSON(map[string]any, string) string     (when any Object attribute)
+	//   objectParam(string) any                          (when any Object attribute)
 	//   toStringSlice(context.Context, types.Set, *diag.Diagnostics) []string
+	//     (must return nil for a null or unknown set)
 	//   stringSetValue(context.Context, []string) types.Set
 	// and a *clients.Client passed via ResourceData.
 }

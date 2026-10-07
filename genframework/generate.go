@@ -18,6 +18,11 @@ type File struct {
 // gofmt-formatted; a formatting error surfaces the offending source for
 // debugging.
 func Generate(cfg Config, resources []Resource) ([]File, error) {
+	for _, r := range resources {
+		if err := r.validate(); err != nil {
+			return nil, fmt.Errorf("%s: %w", r.Noun, err)
+		}
+	}
 	var files []File
 	sorted := append([]Resource(nil), resources...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Noun < sorted[j].Noun })
@@ -56,6 +61,27 @@ func Generate(cfg Config, resources []Resource) ([]File, error) {
 	}
 	files = append(files, File{Name: "zz_generated_resources.go", Content: reg})
 	return files, nil
+}
+
+// validate rejects attribute combinations the emitter cannot render correctly.
+func (r Resource) validate() error {
+	for _, a := range r.Attributes {
+		// Object is the System.Object JSON round-trip (a string attribute written
+		// into an `any` field). A param whose declared type is bool/int/list must be
+		// modelled as that type with Object=false, so it takes the typed write path.
+		if a.Object && a.Type != TypeString {
+			return fmt.Errorf("attribute %s: Object requires TypeString", a.TFName)
+		}
+	}
+	return nil
+}
+
+// identityStable reports whether the computed identity cannot change across an
+// in-place update, so it may keep its prior value via UseStateForUnknown. It can
+// change only when it may be read back from an updatable Name.
+func (r Resource) identityStable() bool {
+	n := r.field("Name")
+	return n == nil || n.Replace || !n.InUpdate
 }
 
 func gofmt(src string) ([]byte, error) {
@@ -342,6 +368,63 @@ func (a Attribute) planValue() string {
 			return "plan." + a.Field + ".ValueStringPointer()"
 		}
 		return "plan." + a.Field + ".ValueString()"
+	}
+}
+
+// writeSite says which kind of write a params assignment is part of. It only
+// matters for sets, where an empty list is meaningful (it clears the property).
+type writeSite int
+
+const (
+	// siteNew: a New-<Noun> create. There is nothing to clear yet, so a set is
+	// sent only when it has elements.
+	siteNew writeSite = iota
+	// siteSet: a Set-<Noun> applying configured values (adopt/config create, or a
+	// sparse update already gated on "changed"). A known set is always sent, an
+	// empty one as [] so it clears the existing list.
+	siteSet
+	// siteUpdate: a full re-send update. A known set is sent when it has elements
+	// or differs from state, so clearing a list sends [] but an already-empty list
+	// is not re-sent on every apply.
+	siteUpdate
+)
+
+// guardedWrite reports whether the attribute's params assignment needs a
+// per-value guard instead of an unconditional assignment: pointer fields (an
+// unknown value would otherwise send &false / &0 / &"") and sets (nil means
+// "not sent", a non-nil empty slice sends []).
+func (a Attribute) guardedWrite() bool {
+	return a.PointerParam || a.Type == TypeStringSet
+}
+
+// writeStmt renders the assignment of the attribute's plan value into params
+// variable pv (e.g. "p", "sp"), terminated by a newline. Callers add their own
+// outer gate (SparseWrite's config/changed checks); this adds only the
+// type-specific guard so an unknown value is never sent:
+//   - pointer fields are left nil while the plan value is unknown;
+//   - sets are left nil while null/unknown, and otherwise get a non-nil slice
+//     (possibly empty) according to site.
+//
+// The update site references `state`, which must be in scope.
+func (a Attribute) writeStmt(pv string, site writeSite) string {
+	f := a.Field
+	switch {
+	case a.Type == TypeStringSet:
+		known := fmt.Sprintf("!plan.%s.IsNull() && !plan.%s.IsUnknown()", f, f)
+		read := fmt.Sprintf("toStringSlice(ctx, plan.%s, &resp.Diagnostics)", f)
+		switch site {
+		case siteNew:
+			return fmt.Sprintf("if v := %s; len(v) > 0 {\n%s.%s = v\n}\n", read, pv, f)
+		case siteUpdate:
+			return fmt.Sprintf("if %s {\nif v := %s; len(v) > 0 || !plan.%s.Equal(state.%s) {\n%s.%s = append([]string{}, v...)\n}\n}\n",
+				known, read, f, f, pv, f)
+		default:
+			return fmt.Sprintf("if %s {\n%s.%s = append([]string{}, %s...)\n}\n", known, pv, f, read)
+		}
+	case a.PointerParam:
+		return fmt.Sprintf("if !plan.%s.IsUnknown() {\n%s.%s = %s\n}\n", f, pv, f, a.planValue())
+	default:
+		return fmt.Sprintf("%s.%s = %s\n", pv, f, a.planValue())
 	}
 }
 
