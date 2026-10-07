@@ -427,3 +427,22 @@ func TestInt64Attribute(t *testing.T) {
 		}
 	}
 }
+
+// TestSparseUpdateGuardsObjectAttributes verifies that a SparseWrite update
+// re-sends a System.Object attribute (enum, Unlimited, ...) only when it changed,
+// like every other attribute; a non-sparse update keeps the full re-send.
+func TestSparseUpdateGuardsObjectAttributes(t *testing.T) {
+	cfg, r := roleGroupFixture()
+	r.SparseWrite = true
+	r.Attributes = append(r.Attributes, Attribute{TFName: "auto_forwarding_mode", Field: "AutoForwardingMode", APIName: "AutoForwardingMode",
+		Type: TypeString, Computed: true, Object: true, InCreate: true, InUpdate: true})
+	src := genOne(t, cfg, r)
+	wantAll(t, src, "if !plan.AutoForwardingMode.Equal(state.AutoForwardingMode) {\n\t\tif v := plan.AutoForwardingMode.ValueString(); v != \"\" {\n\t\t\tsp.AutoForwardingMode = objectParam(v)")
+	if strings.Contains(src, "\n\tif v := plan.AutoForwardingMode.ValueString(); v != \"\" {\n\t\tsp.AutoForwardingMode") {
+		t.Error("SparseWrite update must guard Object attributes on Equal(state), not re-send them unconditionally")
+	}
+
+	r.SparseWrite = false
+	src = genOne(t, cfg, r)
+	wantAll(t, src, "\n\tif v := plan.AutoForwardingMode.ValueString(); v != \"\" {\n\t\tsp.AutoForwardingMode = objectParam(v)")
+}
