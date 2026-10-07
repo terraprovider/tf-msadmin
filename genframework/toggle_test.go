@@ -48,6 +48,9 @@ func TestToggleUpdate(t *testing.T) {
 		"resourcex.RetryWriteCall(ctx, consistency.Config{}, r.client.EXO.EnableSafeLinksRule, exo.EnableSafeLinksRuleParams{Identity: id}, isNotFound); err != nil {\n\t\t\t\tresp.Diagnostics.AddError(\"Enable-SafeLinksRule failed\", err.Error())",
 		"resourcex.RetryWriteCall(ctx, consistency.Config{}, r.client.EXO.DisableSafeLinksRule, exo.DisableSafeLinksRuleParams{Identity: id}, isNotFound); err != nil {\n\t\t\t\tresp.Diagnostics.AddError(\"Disable-SafeLinksRule failed\", err.Error())",
 	)
+	// The post-write refresh waits until the toggle is visible: a changed toggle
+	// extends the reflected predicate with the same State/APIName mapping.
+	wantAll(t, src, "if !cfg.Enabled.IsUnknown() && !cfg.Enabled.IsNull() && !cfg.Enabled.Equal(state.Enabled) {\n\t\tprev, want := reflected, cfg.Enabled.ValueBool()\n\t\treflected = func(obj map[string]any) bool { return prev(obj) && getStateBool(obj, \"State\", \"Enabled\") == want }")
 	// Never written into the Set params, and not replace-only.
 	if strings.Contains(src, "sp.Enabled") {
 		t.Error("Toggle attribute must not be written into the Set params")
@@ -58,9 +61,10 @@ func TestToggleUpdate(t *testing.T) {
 	// The toggle runs after the Set write and before the post-write refresh.
 	set := strings.Index(src, "r.client.EXO.SetSafeLinksRule, sp")
 	tog := strings.Index(src, "r.client.EXO.EnableSafeLinksRule")
+	pred := strings.Index(src, "prev, want := reflected")
 	ref := strings.Index(src, "r.refresh(ctx, id, &plan, &resp.Diagnostics, reflected)")
-	if !(set >= 0 && set < tog && tog < ref) {
-		t.Errorf("want Set < toggle < refresh, got %d, %d, %d", set, tog, ref)
+	if !(set >= 0 && set < tog && tog < pred && pred < ref) {
+		t.Errorf("want Set < toggle < predicate < refresh, got %d, %d, %d, %d", set, tog, pred, ref)
 	}
 }
 
