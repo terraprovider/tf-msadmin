@@ -1,6 +1,7 @@
 package genframework
 
 import (
+	"bytes"
 	"fmt"
 	"go/format"
 	"sort"
@@ -18,6 +19,11 @@ type File struct {
 // gofmt-formatted; a formatting error surfaces the offending source for
 // debugging.
 func Generate(cfg Config, resources []Resource) ([]File, error) {
+	for _, r := range resources {
+		if err := r.validate(); err != nil {
+			return nil, fmt.Errorf("%s: %w", r.Noun, err)
+		}
+	}
 	var files []File
 	sorted := append([]Resource(nil), resources...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Noun < sorted[j].Noun })
@@ -56,6 +62,85 @@ func Generate(cfg Config, resources []Resource) ([]File, error) {
 	}
 	files = append(files, File{Name: "zz_generated_resources.go", Content: reg})
 	return files, nil
+}
+
+// validate rejects attribute combinations the emitter cannot render correctly.
+func (r Resource) validate() error {
+	for _, a := range r.Attributes {
+		// Object is the System.Object JSON round-trip (a string attribute written
+		// into an `any` field). A param whose declared type is bool/int/list must be
+		// modelled as that type with Object=false, so it takes the typed write path.
+		if a.Object && a.Type != TypeString {
+			return fmt.Errorf("attribute %s: Object requires TypeString", a.TFName)
+		}
+		if a.Delta && a.Type != TypeStringSet {
+			return fmt.Errorf("attribute %s: Delta requires TypeStringSet", a.TFName)
+		}
+	}
+	return nil
+}
+
+// hasUpdateDelta reports whether a Set-* write may clear a list via a Remove
+// delta, which needs the current() re-read emitted by genCurrent.
+func (r Resource) hasUpdateDelta() bool {
+	for _, a := range r.Attributes {
+		if a.Delta && a.InUpdate {
+			return true
+		}
+	}
+	return false
+}
+
+// genCurrent emits, before a Set-* params build, a lazily evaluated current()
+// that re-reads the object at most once, so a cleared Delta list can send
+// Remove = the server's current values. A failed read (including "not found"
+// after the retry budget, which refresh reports without a diagnostic) adds an
+// error, so the caller's HasError check aborts the Set: otherwise the delta
+// would be skipped silently and reconcile would record the configured empty
+// list while the server list is unchanged. The outcome is cached, so several
+// cleared lists share one read. Nothing is emitted when no attribute uses a
+// delta.
+func genCurrent(b *bytes.Buffer, r Resource, idExpr string) {
+	if !r.hasUpdateDelta() {
+		return
+	}
+	model := r.model()
+	fmt.Fprintf(b, "\tvar cur *%s\n", model)
+	fmt.Fprintf(b, "\tcurRead := false\n")
+	fmt.Fprintf(b, "\tcurrent := func() *%s {\n", model)
+	fmt.Fprintf(b, "\t\tif !curRead {\n\t\t\tcurRead = true\n\t\t\tvar m %s\n", model)
+	fmt.Fprintf(b, "\t\t\tif r.refresh(ctx, %s, &m, &resp.Diagnostics, nil) {\n\t\t\t\tcur = &m\n", idExpr)
+	fmt.Fprintf(b, "\t\t\t} else if !resp.Diagnostics.HasError() {\n\t\t\t\tresp.Diagnostics.AddError(%q, %q)\n\t\t\t}\n",
+		r.cmdlet("Get")+" failed", "the object could not be read to determine the list values to remove; nothing was changed")
+	fmt.Fprintf(b, "\t\t}\n\t\treturn cur\n\t}\n")
+}
+
+// identitySources are the read-back fields identityReadExpr may take the
+// identity from.
+func (r Resource) identitySources() []string {
+	src := []string{"Identity", "Guid", "Name"}
+	if f := r.IdentityReadField; f != "" {
+		src = append(src, f)
+	}
+	return src
+}
+
+// identityStable reports whether the computed identity cannot change across an
+// in-place update, so it may keep its prior value via UseStateForUnknown. It can
+// change when an in-place-updatable attribute is read back from any field the
+// identity may be sourced from (matched by APIName, not the Go field name).
+func (r Resource) identityStable() bool {
+	for _, a := range r.Attributes {
+		if !a.InUpdate || a.Replace {
+			continue
+		}
+		for _, s := range r.identitySources() {
+			if a.APIName == s {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func gofmt(src string) ([]byte, error) {
@@ -342,6 +427,72 @@ func (a Attribute) planValue() string {
 			return "plan." + a.Field + ".ValueStringPointer()"
 		}
 		return "plan." + a.Field + ".ValueString()"
+	}
+}
+
+// writeSite says which kind of write a params assignment is part of. It only
+// matters for sets, where an empty list is meaningful (it clears the property).
+type writeSite int
+
+const (
+	// siteNew: a New-<Noun> create. There is nothing to clear yet, so a set is
+	// sent only when it has elements.
+	siteNew writeSite = iota
+	// siteSet: a Set-<Noun> applying configured values (adopt/config create, or a
+	// sparse update already gated on "changed"). A known set is always sent, an
+	// empty one as [] so it clears the existing list.
+	siteSet
+	// siteUpdate: a full re-send update. A known set is sent when it has elements
+	// or differs from state, so clearing a list sends [] but an already-empty list
+	// is not re-sent on every apply.
+	siteUpdate
+)
+
+// guardedWrite reports whether the attribute's params assignment needs a
+// per-value guard instead of an unconditional assignment: pointer fields (an
+// unknown value would otherwise send &false / &0 / &"") and sets (nil means
+// "not sent", a non-nil empty slice sends []).
+func (a Attribute) guardedWrite() bool {
+	return a.PointerParam || a.Type == TypeStringSet
+}
+
+// writeStmt renders the assignment of the attribute's plan value into params
+// variable pv (e.g. "p", "sp"), terminated by a newline. Callers add their own
+// outer gate (SparseWrite's config/changed checks); this adds only the
+// type-specific guard so an unknown value is never sent:
+//   - pointer fields are left nil while the plan value is unknown;
+//   - sets are left nil while null/unknown, and otherwise get a non-nil slice
+//     (possibly empty) according to site.
+//
+// The update site references `state`, which must be in scope.
+func (a Attribute) writeStmt(pv string, site writeSite) string {
+	f := a.Field
+	switch {
+	case a.Type == TypeStringSet:
+		known := fmt.Sprintf("!plan.%s.IsNull() && !plan.%s.IsUnknown()", f, f)
+		read := fmt.Sprintf("toStringSlice(ctx, plan.%s, &resp.Diagnostics)", f)
+		switch {
+		case site == siteNew:
+			return fmt.Sprintf("if v := %s; len(v) > 0 {\n%s.%s = v\n}\n", read, pv, f)
+		case a.Delta:
+			// Set-* with a delta companion: non-empty is a full replace; empty
+			// removes the current server values (an empty list would be ignored).
+			// A full-resend update only clears when the set actually changed.
+			remove := fmt.Sprintf("if c := current(); c != nil {\nif rm := toStringSlice(ctx, c.%s, &resp.Diagnostics); len(rm) > 0 {\n%s.%sDelta = listRemoveDelta(rm)\n}\n}\n", f, pv, f)
+			if site == siteUpdate {
+				remove = fmt.Sprintf("if !plan.%s.Equal(state.%s) {\n%s}\n", f, f, remove)
+			}
+			return fmt.Sprintf("if %s {\nif v := %s; len(v) > 0 {\n%s.%s = v\n} else {\n%s}\n}\n", known, read, pv, f, remove)
+		case site == siteUpdate:
+			return fmt.Sprintf("if %s {\nif v := %s; len(v) > 0 || !plan.%s.Equal(state.%s) {\n%s.%s = append([]string{}, v...)\n}\n}\n",
+				known, read, f, f, pv, f)
+		default:
+			return fmt.Sprintf("if %s {\n%s.%s = append([]string{}, %s...)\n}\n", known, pv, f, read)
+		}
+	case a.PointerParam:
+		return fmt.Sprintf("if !plan.%s.IsUnknown() {\n%s.%s = %s\n}\n", f, pv, f, a.planValue())
+	default:
+		return fmt.Sprintf("%s.%s = %s\n", pv, f, a.planValue())
 	}
 }
 

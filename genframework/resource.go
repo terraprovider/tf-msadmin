@@ -126,6 +126,11 @@ func genResource(cfg Config, r Resource) ([]byte, error) {
 	} else if r.IdentityIsName {
 		fmt.Fprintf(&b, "\t\t\t%q: schema.StringAttribute{Required: true, Description: %q, PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}},\n",
 			"identity", "Name (Identity) of the object; also the create key. Changing it forces replacement.")
+	} else if r.identityStable() {
+		// Keep the prior identity on update so plans don't show it as
+		// "(known after apply)"; it cannot change in place.
+		fmt.Fprintf(&b, "\t\t\t%q: schema.StringAttribute{Computed: true, Description: %q, PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},\n",
+			"identity", "Identity used to target the object in cmdlets.")
 	} else {
 		fmt.Fprintf(&b, "\t\t\t%q: schema.StringAttribute{Computed: true, Description: %q},\n",
 			"identity", "Identity used to target the object in cmdlets.")
@@ -202,16 +207,23 @@ func genCreate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 				fmt.Fprintf(b, "\tif v := config.%s.ValueString(); v != \"\" {\n\t\tp.%s = objectParam(v)\n\t}\n", a.Field, a.Field)
 				continue
 			}
-			fmt.Fprintf(b, "\tif !config.%s.IsNull() {\n\t\tp.%s = %s\n\t}\n", a.Field, a.Field, a.planValue())
+			fmt.Fprintf(b, "\tif !config.%s.IsNull() {\n%s}\n", a.Field, a.writeStmt("p", siteNew))
 		}
 	} else {
 		fmt.Fprintf(b, "\tp := %s.%s{\n", pkg, r.Create.Params)
 		for _, a := range r.Attributes {
-			if a.InCreate && !a.Object {
+			if a.InCreate && !a.Object && !a.guardedWrite() {
 				fmt.Fprintf(b, "\t\t%s: %s,\n", a.Field, a.planValue())
 			}
 		}
 		fmt.Fprintf(b, "\t}\n")
+		// Pointer and set fields stay nil (not sent) while unknown, i.e. for an
+		// unconfigured Optional+Computed attribute.
+		for _, a := range r.Attributes {
+			if a.InCreate && !a.Object && a.guardedWrite() {
+				b.WriteString(a.writeStmt("p", siteNew))
+			}
+		}
 		// System.Object params are `any` fields: only set when non-empty so "" is
 		// not marshalled as a value.
 		for _, a := range r.Attributes {
@@ -273,6 +285,7 @@ func genAdoptBranch(b *bytes.Buffer, r Resource, svc, pkg string) {
 	fmt.Fprintf(b, "\tif plan.Identity.ValueString() == %q {\n", r.AdoptIdentity)
 	fmt.Fprintf(b, "\t\tsp := %s.%s{}\n", pkg, r.Update.Params)
 	fmt.Fprintf(b, "\t\tsp.%s = plan.Identity.ValueString()\n", idField)
+	genCurrent(b, r, "plan.Identity.ValueString()")
 	for _, a := range r.Attributes {
 		if !a.InUpdate {
 			continue
@@ -283,7 +296,7 @@ func genAdoptBranch(b *bytes.Buffer, r Resource, svc, pkg string) {
 		default:
 			// Adopt is always SparseWrite: send only what the operator configured
 			// (config, not the ModifyPlan-filled plan).
-			fmt.Fprintf(b, "\t\tif !config.%s.IsNull() {\n\t\t\tsp.%s = %s\n\t\t}\n", a.Field, a.Field, a.planValue())
+			fmt.Fprintf(b, "\t\tif !config.%s.IsNull() {\n%s}\n", a.Field, a.writeStmt("sp", siteSet))
 		}
 	}
 	fmt.Fprintf(b, "\t\tif resp.Diagnostics.HasError() {\n\t\t\treturn\n\t\t}\n")
@@ -371,6 +384,11 @@ func genConfigCreate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, 
 	if r.Update.IdentityField != "" {
 		fmt.Fprintf(b, "\tsp.%s = plan.Identity.ValueString()\n", r.Update.IdentityField)
 	}
+	if r.Singleton {
+		genCurrent(b, r, `""`)
+	} else {
+		genCurrent(b, r, "plan.Identity.ValueString()")
+	}
 	for _, a := range r.Attributes {
 		if !a.InUpdate {
 			continue
@@ -383,9 +401,9 @@ func genConfigCreate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, 
 		case r.SparseWrite:
 			// Adopt-create: send only configured fields (config, not the possibly
 			// ModifyPlan-filled plan) so we don't force-set unmanaged settings.
-			fmt.Fprintf(b, "\tif !config.%s.IsNull() {\n\t\tsp.%s = %s\n\t}\n", a.Field, a.Field, a.planValue())
+			fmt.Fprintf(b, "\tif !config.%s.IsNull() {\n%s}\n", a.Field, a.writeStmt("sp", siteSet))
 		default:
-			fmt.Fprintf(b, "\tsp.%s = %s\n", a.Field, a.planValue())
+			b.WriteString(a.writeStmt("sp", siteSet))
 		}
 	}
 	fmt.Fprintf(b, "\tif resp.Diagnostics.HasError() {\n\t\treturn\n\t}\n")
@@ -464,6 +482,7 @@ func genUpdate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 	if r.Update.IdentityField != "" {
 		fmt.Fprintf(b, "\tsp.%s = id\n", r.Update.IdentityField)
 	}
+	genCurrent(b, r, "id")
 	for _, a := range r.Attributes {
 		if !a.InUpdate {
 			continue
@@ -475,9 +494,9 @@ func genUpdate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 			// Sparse update: send only fields that changed, so we don't re-set
 			// unchanged (and possibly permission-gated) settings on every apply —
 			// matching Set-Cs*, which touches only the parameters you pass.
-			fmt.Fprintf(b, "\tif !plan.%s.Equal(state.%s) {\n\t\tsp.%s = %s\n\t}\n", a.Field, a.Field, a.Field, a.planValue())
+			fmt.Fprintf(b, "\tif !plan.%s.Equal(state.%s) {\n%s}\n", a.Field, a.Field, a.writeStmt("sp", siteSet))
 		default:
-			fmt.Fprintf(b, "\tsp.%s = %s\n", a.Field, a.planValue())
+			b.WriteString(a.writeStmt("sp", siteUpdate))
 		}
 	}
 	fmt.Fprintf(b, "\tif resp.Diagnostics.HasError() {\n\t\treturn\n\t}\n")
