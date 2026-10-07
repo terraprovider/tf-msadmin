@@ -168,3 +168,32 @@ func TestDeltaRequiresSet(t *testing.T) {
 		t.Fatalf("want Delta/TypeStringSet error, got %v", err)
 	}
 }
+
+func TestIdentityStableMatchesAPIName(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Resource)
+		stable bool
+	}{
+		{"create-only name", func(r *Resource) {}, true},
+		{"renamed field read back as Name", func(r *Resource) {
+			r.Attributes = append(r.Attributes, Attribute{TFName: "label", Field: "Label", APIName: "Name", Type: TypeString, Computed: true, InUpdate: true})
+		}, false},
+		{"updatable IdentityReadField", func(r *Resource) {
+			r.IdentityReadField = "PlaceMailboxId"
+			r.Attributes = append(r.Attributes, Attribute{TFName: "place_mailbox_id", Field: "PlaceMailboxId", APIName: "PlaceMailboxId", Type: TypeString, Computed: true, InUpdate: true})
+		}, false},
+		{"IdentityReadField is create-only", func(r *Resource) {
+			r.IdentityReadField = "PlaceMailboxId"
+			r.Attributes = append(r.Attributes, Attribute{TFName: "place_mailbox_id", Field: "PlaceMailboxId", APIName: "PlaceMailboxId", Type: TypeString, Required: true, Replace: true, InCreate: true})
+		}, true},
+	}
+	for _, c := range cases {
+		cfg, r := typedFixture()
+		c.mutate(&r)
+		got := strings.Contains(identityLine(genOne(t, cfg, r)), "UseStateForUnknown()")
+		if got != c.stable {
+			t.Errorf("%s: UseStateForUnknown on identity = %v, want %v", c.name, got, c.stable)
+		}
+	}
+}

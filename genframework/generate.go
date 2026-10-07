@@ -115,12 +115,32 @@ func genCurrent(b *bytes.Buffer, r Resource, idExpr string) {
 	fmt.Fprintf(b, "\t\t}\n\t\treturn cur\n\t}\n")
 }
 
+// identitySources are the read-back fields identityReadExpr may take the
+// identity from.
+func (r Resource) identitySources() []string {
+	src := []string{"Identity", "Guid", "Name"}
+	if f := r.IdentityReadField; f != "" {
+		src = append(src, f)
+	}
+	return src
+}
+
 // identityStable reports whether the computed identity cannot change across an
 // in-place update, so it may keep its prior value via UseStateForUnknown. It can
-// change only when it may be read back from an updatable Name.
+// change when an in-place-updatable attribute is read back from any field the
+// identity may be sourced from (matched by APIName, not the Go field name).
 func (r Resource) identityStable() bool {
-	n := r.field("Name")
-	return n == nil || n.Replace || !n.InUpdate
+	for _, a := range r.Attributes {
+		if !a.InUpdate || a.Replace {
+			continue
+		}
+		for _, s := range r.identitySources() {
+			if a.APIName == s {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func gofmt(src string) ([]byte, error) {
