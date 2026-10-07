@@ -19,7 +19,7 @@ type AttrType int
 const (
 	TypeString    AttrType = iota // types.String  <- string / *.guid
 	TypeBool                      // types.Bool    <- switch / bool
-	TypeStringSet                 // types.Set of String <- []string
+	TypeStringSet                 // types.Set of String <- []string (nil = not sent, empty = sent as [] to clear)
 	TypeInt                       // types.Int64   <- int / *int64
 )
 
@@ -54,13 +54,26 @@ type Attribute struct {
 	// "" must be distinguishable from unset. Create/update then pass
 	// ValueBoolPointer() / ValueStringPointer().
 	//
-	// NOTE: ValueBoolPointer()/ValueStringPointer() return nil only for a *null*
-	// value — for an *unknown* value (an unconfigured Optional+Computed attribute
-	// on create) they return a pointer to the zero value (&false / &""), which
-	// would be marshalled and sent. Set Resource.SparseWrite so create/update omit
-	// unknown (and, on update, unchanged) fields — otherwise every tri-state field
-	// is force-set to false, which the Teams API rejects for gated toggles.
+	// Also set it for the go-exoscc typed bindings, which bind typed (non-switch)
+	// bool and integer params as *bool / *int64 so false / 0 can be sent.
+	//
+	// ValueBoolPointer()/ValueInt64Pointer()/ValueStringPointer() return a pointer
+	// to the zero value for an *unknown* plan value (an unconfigured
+	// Optional+Computed attribute on create), so the generated write leaves a
+	// pointer field nil while its plan value is unknown. Resource.SparseWrite
+	// additionally omits fields the operator did not configure (create) or did not
+	// change (update); set it together with PointerParam so a read-back false / 0
+	// is not re-sent on every update.
 	PointerParam bool
+	// Delta marks a TypeStringSet whose Set params also carry a companion
+	// <Field>Delta field (go-exoscc: Set-* params that are System.Object with docs
+	// type MultiValuedProperty). These APIs ignore an empty list, so clearing needs
+	// a Remove delta. When the planned set is empty, a Set-* write re-reads the
+	// object and sends <Field>Delta = listRemoveDelta(<current values>). It reads
+	// the server values rather than state, which holds the configured (not
+	// normalized) strings. A non-empty set is still sent as a full replace, and
+	// New-* never sends a delta.
+	Delta bool
 }
 
 // Op is a client operation binding: the generated code calls
@@ -151,12 +164,14 @@ type Resource struct {
 	// SparseWrite makes create/update send only the fields the operator actually
 	// set, matching how the PowerShell cmdlets behave (they touch only the
 	// parameters you pass). Create omits attributes whose plan value is unknown or
-	// null; update omits attributes unchanged from prior state. Without it, an
-	// unconfigured Optional+Computed attribute is written as its zero value (and a
-	// tri-state *bool as an explicit false — see Attribute.PointerParam), which the
-	// Teams API rejects with 403 for permission-gated toggles the caller never
-	// meant to touch. Required for the Teams surface; leave false for providers
-	// (Exchange) whose Set cmdlets tolerate full re-sends.
+	// null; update omits attributes unchanged from prior state. Without it, update
+	// re-sends every known value, including ones that were only read back. With
+	// pointer fields (Attribute.PointerParam) a read-back false / 0 is then sent
+	// explicitly, and the API can reject it: the Teams API returns 403 for
+	// permission-gated toggles, and Exchange rejects a 0 read back for a
+	// deprecated property it no longer returns (e.g. Set-HostedContentFilterPolicy
+	// -EndUserSpamNotificationFrequency, valid range 1-15). Set it whenever the
+	// bindings use pointer fields (Teams, and the go-exoscc typed bindings).
 	SparseWrite bool
 
 	// Assignment marks a per-user policy-assignment resource: it manages the grant
@@ -214,7 +229,13 @@ type Config struct {
 	//   getBool(map[string]any, string) bool
 	//   firstNonEmptyStr(...string) string
 	//   isNotFound(error) bool
+	//   getInt(map[string]any, string) int64              (when any TypeInt attribute)
+	//   getObjectJSON(map[string]any, string) string     (when any Object attribute)
+	//   objectParam(string) any                          (when any Object attribute)
 	//   toStringSlice(context.Context, types.Set, *diag.Diagnostics) []string
+	//     (must return nil for a null or unknown set)
 	//   stringSetValue(context.Context, []string) types.Set
+	//   listRemoveDelta([]string) <delta>                (when any Delta attribute;
+	//     returns the bindings' delta value, e.g. &adminapi.StringDelta{Remove: v})
 	// and a *clients.Client passed via ResourceData.
 }
