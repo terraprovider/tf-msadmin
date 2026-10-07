@@ -35,6 +35,23 @@ func RetryWrite(ctx context.Context, cfg consistency.Config, do func(context.Con
 	return nil
 }
 
+// RetryWriteCall is RetryWrite for a bindings call that returns a result: it
+// runs call(ctx, p) under the same retry policy and returns the result of the
+// last attempt. Generated Create/Update use it (with isNotFound) for the main
+// New-/Set- write, so a write that references an object created moments earlier
+// in the same apply (e.g. Set-OrganizationConfig -DefaultAuthenticationPolicy,
+// New-SafeLinksRule -SafeLinksPolicy) rides out directory replication lag
+// instead of failing with ManagementObjectNotFoundException.
+func RetryWriteCall[P, T any](ctx context.Context, cfg consistency.Config, call func(context.Context, P) (T, error), p P, retryable func(error) bool) (T, error) {
+	var res T
+	err := RetryWrite(ctx, cfg, func(ctx context.Context) error {
+		var e error
+		res, e = call(ctx, p)
+		return e
+	}, retryable)
+	return res, err
+}
+
 // LoadUntil reads a resource, tolerating the eventual consistency of the
 // Microsoft admin APIs:
 //

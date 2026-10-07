@@ -241,7 +241,11 @@ func genCreate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 		fmt.Fprintf(b, "\tp.%s = plan.Identity.ValueString()\n", key)
 	}
 	fmt.Fprintf(b, "\tif resp.Diagnostics.HasError() {\n\t\treturn\n\t}\n")
-	fmt.Fprintf(b, "\tres, err := %s.%s(ctx, p)\n", svc, r.Create.Method)
+	// Main writes (New here, Set in Update/config Create/adopt) retry on
+	// isNotFound: a write referencing an object created moments earlier in the
+	// same apply can hit a directory server the object hasn't replicated to yet.
+	// Read/Delete stay fast on not-found (they use it to detect real removal).
+	fmt.Fprintf(b, "\tres, err := resourcex.RetryWriteCall(ctx, consistency.Config{}, %s.%s, p, isNotFound)\n", svc, r.Create.Method)
 	fmt.Fprintf(b, "\tif err != nil {\n\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\treturn\n\t}\n", r.cmdlet("New")+" failed")
 	fmt.Fprintf(b, "\tobj := firstObject(res.Value)\n")
 	fmt.Fprintf(b, "\tcfg := plan\n")
@@ -300,7 +304,7 @@ func genAdoptBranch(b *bytes.Buffer, r Resource, svc, pkg string) {
 		}
 	}
 	fmt.Fprintf(b, "\t\tif resp.Diagnostics.HasError() {\n\t\t\treturn\n\t\t}\n")
-	fmt.Fprintf(b, "\t\tif _, err := %s.%s(ctx, sp); err != nil {\n\t\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\t\treturn\n\t\t}\n", svc, r.Update.Method, r.cmdlet("Set")+" failed")
+	fmt.Fprintf(b, "\t\tif _, err := resourcex.RetryWriteCall(ctx, consistency.Config{}, %s.%s, sp, isNotFound); err != nil {\n\t\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\t\treturn\n\t\t}\n", svc, r.Update.Method, r.cmdlet("Set")+" failed")
 	fmt.Fprintf(b, "\t\tcfg := plan\n")
 	fmt.Fprintf(b, "\t\tident := plan.Identity.ValueString()\n")
 	fmt.Fprintf(b, "\t\tif !r.refresh(ctx, ident, &plan, &resp.Diagnostics, nil) {\n")
@@ -407,7 +411,7 @@ func genConfigCreate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, 
 		}
 	}
 	fmt.Fprintf(b, "\tif resp.Diagnostics.HasError() {\n\t\treturn\n\t}\n")
-	fmt.Fprintf(b, "\tif _, err := %s.%s(ctx, sp); err != nil {\n\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\treturn\n\t}\n", svc, r.Update.Method, r.cmdlet("Set")+" failed")
+	fmt.Fprintf(b, "\tif _, err := resourcex.RetryWriteCall(ctx, consistency.Config{}, %s.%s, sp, isNotFound); err != nil {\n\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\treturn\n\t}\n", svc, r.Update.Method, r.cmdlet("Set")+" failed")
 	fmt.Fprintf(b, "\tcfg := plan\n")
 	if r.Singleton {
 		fmt.Fprintf(b, "\tidentity := \"\"\n")
@@ -504,7 +508,7 @@ func genUpdate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 		}
 	}
 	fmt.Fprintf(b, "\tif resp.Diagnostics.HasError() {\n\t\treturn\n\t}\n")
-	fmt.Fprintf(b, "\tif _, err := %s.%s(ctx, sp); err != nil {\n\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\treturn\n\t}\n", svc, r.Update.Method, r.cmdlet("Set")+" failed")
+	fmt.Fprintf(b, "\tif _, err := resourcex.RetryWriteCall(ctx, consistency.Config{}, %s.%s, sp, isNotFound); err != nil {\n\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\treturn\n\t}\n", svc, r.Update.Method, r.cmdlet("Set")+" failed")
 	fmt.Fprintf(b, "\tcfg := plan\n")
 	// reflected predicate over plain string attributes that were updated. Object
 	// (System.Object/JSON) attributes are excluded: they read back via getObjectJSON

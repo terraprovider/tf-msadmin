@@ -41,7 +41,7 @@ func TestConfigSingletonGeneration(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"r.client.EXO.SetAuditConfig(ctx, sp)",          // Create adopts via Set
+		"resourcex.RetryWriteCall(ctx, consistency.Config{}, r.client.EXO.SetAuditConfig, sp, isNotFound)", // Create adopts via Set (retrying not-found)
 		"resp.Diagnostics.AddWarning",                   // no-op delete warns
 		"exo.GetAuditConfigParams{})",                   // keyless read (singleton)
 		`schema.StringAttribute{Computed: true, Descri`, // identity is computed for a singleton
