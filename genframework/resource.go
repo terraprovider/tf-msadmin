@@ -522,6 +522,13 @@ func genUpdate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 	}
 	fmt.Fprintf(b, "\t}, getString)\n")
 	fmt.Fprintf(b, "\tr.refresh(ctx, id, &plan, &resp.Diagnostics, reflected)\n")
+	// Keep the planned id (prior state, via UseStateForUnknown): the object's GUID
+	// can change on Set (e.g. a Default policy after
+	// Enable-OrganizationCustomization), and a changed id fails the apply as an
+	// inconsistent result. The next Read picks up the new GUID. Identity is not
+	// pinned: identityOf looks objects up by it, so a stale value could miss the
+	// object on the next Read.
+	fmt.Fprintf(b, "\tif !cfg.ID.IsUnknown() && !cfg.ID.IsNull() {\n\t\tplan.ID = cfg.ID\n\t}\n")
 	if mc := r.Members; mc != nil {
 		fmt.Fprintf(b, "\tif !plan.%s.Equal(state.%s) {\n", mc.Field, mc.Field)
 		fmt.Fprintf(b, "\t\tmem := toStringSlice(ctx, plan.%s, &resp.Diagnostics)\n", mc.Field)

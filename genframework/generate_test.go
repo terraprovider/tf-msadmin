@@ -452,3 +452,21 @@ func TestSparseUpdateGuardsObjectAttributes(t *testing.T) {
 	src = genOne(t, cfg, r)
 	wantAll(t, src, "\n\tif v := plan.AutoForwardingMode.ValueString(); v != \"\" {\n\t\tsp.AutoForwardingMode = objectParam(v)")
 }
+
+// TestUpdateKeepsPlannedID verifies that Update restores the planned id after
+// the post-write refresh, so a GUID that changes on Set (e.g. a Default policy
+// after Enable-OrganizationCustomization) does not fail the apply as an
+// inconsistent result. It applies to CRUD and config resources; identity is not
+// pinned.
+func TestUpdateKeepsPlannedID(t *testing.T) {
+	const keep = "\tr.refresh(ctx, id, &plan, &resp.Diagnostics, reflected)\n\tif !cfg.ID.IsUnknown() && !cfg.ID.IsNull() {\n\t\tplan.ID = cfg.ID\n\t}\n"
+	cfg, r := roleGroupFixture()
+	src := genOne(t, cfg, r)
+	wantAll(t, src, keep)
+	if strings.Contains(src, "plan.Identity = cfg.Identity") {
+		t.Error("Update must not pin identity")
+	}
+
+	cfg, r = configResource(true)
+	wantAll(t, genOne(t, cfg, r), keep)
+}
