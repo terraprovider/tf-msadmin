@@ -74,6 +74,30 @@ type Attribute struct {
 	// normalized) strings. A non-empty set is still sent as a full replace, and
 	// New-* never sends a delta.
 	Delta bool
+	// StateField names a string read-back property that encodes a bool attribute
+	// as "Enabled"/"Disabled" (e.g. a rule's State). The read maps
+	// StateField == "Enabled" (case-insensitive) to true and falls back to the
+	// bool APIName property when StateField is absent from the object. TypeBool
+	// only.
+	StateField string
+	// Toggle manages a bool attribute through companion Enable-/Disable- cmdlets
+	// (e.g. Enable-SafeLinksRule / Disable-SafeLinksRule -Identity) because
+	// Set-* does not accept it. The attribute is updated in place: after the main
+	// Set-* write, Update calls the matching cmdlet when the planned value
+	// changed. Create still passes it to New-* (InCreate). TypeBool only, and
+	// neither Replace nor InUpdate (it is never written into the Set params).
+	// Not supported on Config or AdoptIdentity resources, whose create path
+	// applies Set-* and would ignore it.
+	Toggle *Toggle
+}
+
+// Toggle names the companion cmdlets that switch a bool attribute on and off.
+type Toggle struct {
+	EnableMethod  string // e.g. "EnableSafeLinksRule"
+	EnableParams  string // e.g. "EnableSafeLinksRuleParams"
+	DisableMethod string // e.g. "DisableSafeLinksRule"
+	DisableParams string // e.g. "DisableSafeLinksRuleParams"
+	IdentityField string // params field the object is targeted with (default "Identity")
 }
 
 // Op is a client operation binding: the generated code calls
@@ -230,6 +254,9 @@ type Config struct {
 	//   firstNonEmptyStr(...string) string
 	//   isNotFound(error) bool
 	//   getInt(map[string]any, string) int64              (when any TypeInt attribute)
+	//   getStateBool(obj map[string]any, stateField, boolField string) bool
+	//     (when any StateField attribute: stateField == "Enabled" case-insensitively,
+	//     else the bool boolField when stateField is absent)
 	//   getObjectJSON(map[string]any, string) string     (when any Object attribute)
 	//   objectParam(string) any                          (when any Object attribute)
 	//   toStringSlice(context.Context, types.Set, *diag.Diagnostics) []string

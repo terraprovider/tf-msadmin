@@ -76,6 +76,24 @@ func (r Resource) validate() error {
 		if a.Delta && a.Type != TypeStringSet {
 			return fmt.Errorf("attribute %s: Delta requires TypeStringSet", a.TFName)
 		}
+		if a.StateField != "" && a.Type != TypeBool {
+			return fmt.Errorf("attribute %s: StateField requires TypeBool", a.TFName)
+		}
+		if t := a.Toggle; t != nil {
+			switch {
+			case a.Type != TypeBool:
+				return fmt.Errorf("attribute %s: Toggle requires TypeBool", a.TFName)
+			case a.Replace:
+				return fmt.Errorf("attribute %s: Toggle cannot be combined with Replace", a.TFName)
+			case a.InUpdate:
+				return fmt.Errorf("attribute %s: Toggle cannot be combined with InUpdate", a.TFName)
+			case r.Config || r.AdoptIdentity != "":
+				// Their create path applies Set-*, which would silently ignore it.
+				return fmt.Errorf("attribute %s: Toggle is not supported on Config or AdoptIdentity resources", a.TFName)
+			case t.EnableMethod == "" || t.EnableParams == "" || t.DisableMethod == "" || t.DisableParams == "":
+				return fmt.Errorf("attribute %s: Toggle needs Enable/Disable methods and params", a.TFName)
+			}
+		}
 	}
 	return nil
 }
@@ -505,6 +523,9 @@ func (a Attribute) readAssign() string {
 	}
 	switch a.Type {
 	case TypeBool:
+		if a.StateField != "" {
+			return fmt.Sprintf("m.%s = types.BoolValue(getStateBool(obj, %q, %q))", a.Field, a.StateField, a.APIName)
+		}
 		return fmt.Sprintf("m.%s = types.BoolValue(getBool(obj, %q))", a.Field, a.APIName)
 	case TypeStringSet:
 		return fmt.Sprintf("m.%s = stringSetValue(ctx, getStringSlice(obj, %q))", a.Field, a.APIName)
