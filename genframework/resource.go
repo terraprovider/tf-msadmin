@@ -3,6 +3,7 @@ package genframework
 import (
 	"bytes"
 	"fmt"
+	"strings"
 )
 
 func genRegistration(cfg Config, resources []Resource) ([]byte, error) {
@@ -509,6 +510,7 @@ func genUpdate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 	}
 	fmt.Fprintf(b, "\tif resp.Diagnostics.HasError() {\n\t\treturn\n\t}\n")
 	fmt.Fprintf(b, "\tif _, err := resourcex.RetryWriteCall(ctx, consistency.Config{}, %s.%s, sp, isNotFound); err != nil {\n\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\treturn\n\t}\n", svc, r.Update.Method, r.cmdlet("Set")+" failed")
+	genToggles(b, r, svc, pkg)
 	fmt.Fprintf(b, "\tcfg := plan\n")
 	// reflected predicate over plain string attributes that were updated. Object
 	// (System.Object/JSON) attributes are excluded: they read back via getObjectJSON
@@ -521,6 +523,7 @@ func genUpdate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 		}
 	}
 	fmt.Fprintf(b, "\t}, getString)\n")
+	genToggleReflected(b, r)
 	fmt.Fprintf(b, "\tr.refresh(ctx, id, &plan, &resp.Diagnostics, reflected)\n")
 	// Keep the planned id (prior state, via UseStateForUnknown): the object's GUID
 	// can change on Set (e.g. a Default policy after
@@ -803,4 +806,60 @@ func genHelpers(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg s
 		fmt.Fprintf(b, "\tfor _, mm := range vals {\n\t\tmembers = append(members, %s)\n\t}\n", mc.memberReadExpr())
 		fmt.Fprintf(b, "\tm.%s = stringSetValue(ctx, members)\n}\n", mc.Field)
 	}
+}
+
+// genToggles emits, after Update's main Set-* write, the Enable-/Disable-
+// companion call for each Toggle attribute whose planned value changed (see
+// Attribute.Toggle). It targets the same identity as the Set call and uses the
+// same not-found retry.
+func genToggles(b *bytes.Buffer, r Resource, svc, pkg string) {
+	for _, a := range r.Attributes {
+		t := a.Toggle
+		if t == nil {
+			continue
+		}
+		idf := t.IdentityField
+		if idf == "" {
+			idf = "Identity"
+		}
+		f := a.Field
+		call := func(method, params string) string {
+			return fmt.Sprintf("if _, err := resourcex.RetryWriteCall(ctx, consistency.Config{}, %s.%s, %s.%s{%s: id}, isNotFound); err != nil {\n\t\t\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\t\t\treturn\n\t\t\t}\n",
+				svc, method, pkg, params, idf, cmdletName(method)+" failed")
+		}
+		fmt.Fprintf(b, "\tif !plan.%s.IsUnknown() && !plan.%s.IsNull() && !plan.%s.Equal(state.%s) {\n", f, f, f, f)
+		fmt.Fprintf(b, "\t\tif plan.%s.ValueBool() {\n\t\t\t%s\t\t} else {\n\t\t\t%s\t\t}\n\t}\n", f, call(t.EnableMethod, t.EnableParams), call(t.DisableMethod, t.DisableParams))
+	}
+}
+
+// genToggleReflected extends Update's reflected predicate with each Toggle
+// attribute that changed, so the post-write refresh waits until the read-back
+// value (via the same StateField/APIName mapping as the read) shows the toggle
+// instead of accepting a stale object. Toggle attributes are not InUpdate, so
+// the string-based predicate above never covers them.
+func genToggleReflected(b *bytes.Buffer, r Resource) {
+	for _, a := range r.Attributes {
+		if a.Toggle == nil {
+			continue
+		}
+		f := a.Field
+		read := fmt.Sprintf("getBool(obj, %q)", a.APIName)
+		if a.StateField != "" {
+			read = fmt.Sprintf("getStateBool(obj, %q, %q)", a.StateField, a.APIName)
+		}
+		fmt.Fprintf(b, "\tif !cfg.%s.IsUnknown() && !cfg.%s.IsNull() && !cfg.%s.Equal(state.%s) {\n", f, f, f, f)
+		fmt.Fprintf(b, "\t\tprev, want := reflected, cfg.%s.ValueBool()\n", f)
+		fmt.Fprintf(b, "\t\treflected = func(obj map[string]any) bool { return prev(obj) && %s == want }\n\t}\n", read)
+	}
+}
+
+// cmdletName turns a bindings method name into its cmdlet name for
+// diagnostics: "EnableSafeLinksRule" -> "Enable-SafeLinksRule".
+func cmdletName(method string) string {
+	for _, verb := range []string{"Enable", "Disable"} {
+		if strings.HasPrefix(method, verb) && len(method) > len(verb) {
+			return verb + "-" + method[len(verb):]
+		}
+	}
+	return method
 }
