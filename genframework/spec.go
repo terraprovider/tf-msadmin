@@ -62,7 +62,8 @@ type Attribute struct {
 	// Optional+Computed attribute on create), so the generated write leaves a
 	// pointer field nil while its plan value is unknown. Resource.SparseWrite
 	// additionally omits fields the operator did not configure (create) or did not
-	// change (update), which the Teams API needs for permission-gated toggles.
+	// change (update); set it together with PointerParam so a read-back false / 0
+	// is not re-sent on every update.
 	PointerParam bool
 }
 
@@ -154,12 +155,14 @@ type Resource struct {
 	// SparseWrite makes create/update send only the fields the operator actually
 	// set, matching how the PowerShell cmdlets behave (they touch only the
 	// parameters you pass). Create omits attributes whose plan value is unknown or
-	// null; update omits attributes unchanged from prior state. Without it, an
-	// unconfigured Optional+Computed attribute is written as its zero value (and a
-	// tri-state *bool as an explicit false — see Attribute.PointerParam), which the
-	// Teams API rejects with 403 for permission-gated toggles the caller never
-	// meant to touch. Required for the Teams surface; leave false for providers
-	// (Exchange) whose Set cmdlets tolerate full re-sends.
+	// null; update omits attributes unchanged from prior state. Without it, update
+	// re-sends every known value, including ones that were only read back. With
+	// pointer fields (Attribute.PointerParam) a read-back false / 0 is then sent
+	// explicitly, and the API can reject it: the Teams API returns 403 for
+	// permission-gated toggles, and Exchange rejects a 0 read back for a
+	// deprecated property it no longer returns (e.g. Set-HostedContentFilterPolicy
+	// -EndUserSpamNotificationFrequency, valid range 1-15). Set it whenever the
+	// bindings use pointer fields (Teams, and the go-exoscc typed bindings).
 	SparseWrite bool
 
 	// Assignment marks a per-user policy-assignment resource: it manages the grant
