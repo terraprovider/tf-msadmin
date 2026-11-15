@@ -52,18 +52,42 @@ func TestLoadUntilStaleButExists(t *testing.T) {
 	}
 }
 
+// seqGet returns vals in order ("" = not present) and counts the reads.
+func seqGet(vals ...string) (consistency.Getter[string], *int) {
+	n := 0
+	return func(context.Context) (string, bool, error) {
+		v := vals[n]
+		n++
+		return v, v != "", nil
+	}, &n
+}
+
 func TestLoadUntilReflectsEventually(t *testing.T) {
-	vals := []string{"old", "old", "new"}
-	i := 0
-	get := func(context.Context) (string, bool, error) {
-		v := vals[i]
-		i++
-		return v, true, nil
-	}
+	get, n := seqGet("old", "old", "new", "new")
 	reflected := func(s string) bool { return s == "new" }
 	v, present, err := LoadUntil(context.Background(), fastCfg, get, reflected)
-	if err != nil || !present || v != "new" {
-		t.Fatalf("v=%q present=%v err=%v", v, present, err)
+	if err != nil || !present || v != "new" || *n != 4 {
+		t.Fatalf("v=%q present=%v err=%v n=%d", v, present, err, *n)
+	}
+}
+
+// One matching read is not proof: a lagging domain controller can serve the
+// next one (terraform-provider-exo#27). A stale or missing read in between
+// restarts the count.
+func TestLoadUntilNeedsConsecutiveReflectedReads(t *testing.T) {
+	get, n := seqGet("new", "old", "new", "", "new", "new")
+	reflected := func(s string) bool { return s == "new" }
+	v, present, err := LoadUntil(context.Background(), fastCfg, get, reflected)
+	if err != nil || !present || v != "new" || *n != 6 {
+		t.Fatalf("v=%q present=%v err=%v n=%d (want 6 reads)", v, present, err, *n)
+	}
+}
+
+// Without a predicate (plain Read) the first visible read is accepted.
+func TestLoadUntilNoPredicateSingleRead(t *testing.T) {
+	get, n := seqGet("obj", "obj")
+	if _, present, err := LoadUntil(context.Background(), fastCfg, get, nil); err != nil || !present || *n != 1 {
+		t.Fatalf("present=%v err=%v n=%d (want 1 read)", present, err, *n)
 	}
 }
 
