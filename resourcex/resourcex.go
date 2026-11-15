@@ -52,14 +52,23 @@ func RetryWriteCall[P, T any](ctx context.Context, cfg consistency.Config, call 
 	return res, err
 }
 
+// ReflectedReads is how many consecutive reads must reflect a write before
+// LoadUntil accepts it. Each extra read costs one consistency delay (4 s by
+// default) on an Update.
+const ReflectedReads = 2
+
 // LoadUntil reads a resource, tolerating the eventual consistency of the
 // Microsoft admin APIs:
 //
 //   - It retries until the object is visible (rides out post-create lag) — a
 //     get returning present=false is retried for the consistency budget.
 //   - When reflected != nil (used after an update), it additionally retries
-//     until the read reflects the written values, so write-propagation lag does
-//     not surface as spurious drift on the next plan.
+//     until ReflectedReads consecutive reads reflect the written values, so
+//     write-propagation lag does not surface as spurious drift on the next plan.
+//     One matching read is not enough: reads are served by different domain
+//     controllers, and right after a write some still return the old value
+//     (seen live for about 10 s on Set-AuthenticationPolicy), so the next
+//     plan's refresh could still read it.
 //   - If the object is present but never reflects within the budget, the
 //     last-seen (stale) value is still returned with present=true — the caller's
 //     reconcile step makes the configured fields authoritative — so the resource
@@ -70,6 +79,7 @@ func RetryWriteCall[P, T any](ctx context.Context, cfg consistency.Config, call 
 func LoadUntil[T any](ctx context.Context, cfg consistency.Config, get consistency.Getter[T], reflected func(T) bool) (T, bool, error) {
 	var lastSeen T
 	seen := false
+	streak := 0 // consecutive reads that reflect the write
 	wrapped := func(ctx context.Context) (T, bool, error) {
 		v, present, err := get(ctx)
 		if err != nil {
@@ -78,10 +88,23 @@ func LoadUntil[T any](ctx context.Context, cfg consistency.Config, get consisten
 		if present {
 			lastSeen = v
 			seen = true
+		} else {
+			streak = 0
 		}
 		return v, present, nil
 	}
-	v, ok, err := consistency.RetryUntil(ctx, cfg, wrapped, reflected)
+	pred := reflected
+	if reflected != nil {
+		pred = func(v T) bool {
+			if !reflected(v) {
+				streak = 0
+				return false
+			}
+			streak++
+			return streak >= ReflectedReads
+		}
+	}
+	v, ok, err := consistency.RetryUntil(ctx, cfg, wrapped, pred)
 	if err != nil {
 		var zero T
 		return zero, false, err

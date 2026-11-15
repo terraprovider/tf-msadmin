@@ -524,6 +524,7 @@ func genUpdate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 	}
 	fmt.Fprintf(b, "\t}, getString)\n")
 	genToggleReflected(b, r)
+	genScalarReflected(b, r)
 	fmt.Fprintf(b, "\tr.refresh(ctx, id, &plan, &resp.Diagnostics, reflected)\n")
 	// Keep the planned id (prior state, via UseStateForUnknown): the object's GUID
 	// can change on Set (e.g. a Default policy after
@@ -850,6 +851,42 @@ func genToggleReflected(b *bytes.Buffer, r Resource) {
 		fmt.Fprintf(b, "\tif !cfg.%s.IsUnknown() && !cfg.%s.IsNull() && !cfg.%s.Equal(state.%s) {\n", f, f, f, f)
 		fmt.Fprintf(b, "\t\tprev, want := reflected, cfg.%s.ValueBool()\n", f)
 		fmt.Fprintf(b, "\t\treflected = func(obj map[string]any) bool { return prev(obj) && %s == want }\n\t}\n", read)
+	}
+}
+
+// genScalarReflected extends Update's reflected predicate with each updatable
+// bool and int attribute that changed, so the post-write refresh waits out
+// replication lag instead of accepting a read from a domain controller that
+// still has the old value (e.g. Set-AuthenticationPolicy -AllowBasicAuthSmtp:$false
+// read back as True for about 10 s). Only pointer params qualify: their false/0
+// is actually sent. A field the read-back doesn't carry (nil, e.g. an action
+// switch like -MakeDefault that Get doesn't return) counts as reflected, so the
+// wait can't stall on it. A StateField bool is compared with the same
+// getStateBool mapping as the read, and counts as absent only when neither the
+// state property nor the bool property is present. Toggle attributes are left to
+// genToggleReflected.
+func genScalarReflected(b *bytes.Buffer, r Resource) {
+	for _, a := range r.Attributes {
+		if !a.InUpdate || a.Object || !a.PointerParam || a.Toggle != nil {
+			continue
+		}
+		var value, read, absent string
+		switch {
+		case a.Type == TypeBool && a.StateField != "":
+			value = "ValueBool"
+			read = fmt.Sprintf("getStateBool(obj, %q, %q)", a.StateField, a.APIName)
+			absent = fmt.Sprintf("(obj[%q] == nil && obj[%q] == nil)", a.StateField, a.APIName)
+		case a.Type == TypeBool:
+			value, read, absent = "ValueBool", fmt.Sprintf("getBool(obj, %q)", a.APIName), fmt.Sprintf("obj[%q] == nil", a.APIName)
+		case a.Type == TypeInt:
+			value, read, absent = "ValueInt64", fmt.Sprintf("getInt(obj, %q)", a.APIName), fmt.Sprintf("obj[%q] == nil", a.APIName)
+		default:
+			continue
+		}
+		f := a.Field
+		fmt.Fprintf(b, "\tif !cfg.%s.IsUnknown() && !cfg.%s.IsNull() && !cfg.%s.Equal(state.%s) {\n", f, f, f, f)
+		fmt.Fprintf(b, "\t\tprev, want := reflected, cfg.%s.%s()\n", f, value)
+		fmt.Fprintf(b, "\t\treflected = func(obj map[string]any) bool {\n\t\t\treturn prev(obj) && (%s || %s == want)\n\t\t}\n\t}\n", absent, read)
 	}
 }
 
