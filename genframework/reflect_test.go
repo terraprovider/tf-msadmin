@@ -28,6 +28,7 @@ func TestUpdateReflectsChangedScalars(t *testing.T) {
 			t.Errorf("%s must not extend the reflected predicate", field)
 		}
 	}
+	// The toggle (Enabled, StateField + Toggle) is covered once, by genToggleReflected.
 	if n := strings.Count(src, "reflected, cfg.Enabled."); n != 1 {
 		t.Errorf("toggle predicate emitted %d times, want 1 (genToggleReflected only)", n)
 	}
@@ -38,4 +39,19 @@ func TestUpdateReflectsChangedScalars(t *testing.T) {
 	if set < 0 || set >= pred || pred >= ref {
 		t.Errorf("want Set < predicate < refresh, got %d, %d, %d", set, pred, ref)
 	}
+}
+
+// A StateField bool that Set updates directly (no Toggle) is waited for with
+// the same getStateBool mapping as the read, and only counts as absent when
+// neither read-back property is present.
+func TestUpdateReflectsStateFieldBool(t *testing.T) {
+	cfg, r := ruleFixture()
+	r.Attributes = append(r.Attributes,
+		Attribute{TFName: "active", Field: "Active", APIName: "Active", Type: TypeBool, Computed: true, PointerParam: true, InCreate: true, InUpdate: true, StateField: "Mode"},
+	)
+	src := genOne(t, cfg, r)
+	wantAll(t, src,
+		`m.Active = types.BoolValue(getStateBool(obj, "Mode", "Active"))`,
+		"if !cfg.Active.IsUnknown() && !cfg.Active.IsNull() && !cfg.Active.Equal(state.Active) {\n\t\tprev, want := reflected, cfg.Active.ValueBool()\n\t\treflected = func(obj map[string]any) bool {\n\t\t\treturn prev(obj) && ((obj[\"Mode\"] == nil && obj[\"Active\"] == nil) || getStateBool(obj, \"Mode\", \"Active\") == want)\n\t\t}",
+	)
 }

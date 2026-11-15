@@ -861,25 +861,32 @@ func genToggleReflected(b *bytes.Buffer, r Resource) {
 // read back as True for about 10 s). Only pointer params qualify: their false/0
 // is actually sent. A field the read-back doesn't carry (nil, e.g. an action
 // switch like -MakeDefault that Get doesn't return) counts as reflected, so the
-// wait can't stall on it.
+// wait can't stall on it. A StateField bool is compared with the same
+// getStateBool mapping as the read, and counts as absent only when neither the
+// state property nor the bool property is present. Toggle attributes are left to
+// genToggleReflected.
 func genScalarReflected(b *bytes.Buffer, r Resource) {
 	for _, a := range r.Attributes {
-		if !a.InUpdate || a.Object || !a.PointerParam || a.Toggle != nil || a.StateField != "" {
+		if !a.InUpdate || a.Object || !a.PointerParam || a.Toggle != nil {
 			continue
 		}
-		var value, read string
-		switch a.Type {
-		case TypeBool:
-			value, read = "ValueBool", fmt.Sprintf("getBool(obj, %q)", a.APIName)
-		case TypeInt:
-			value, read = "ValueInt64", fmt.Sprintf("getInt(obj, %q)", a.APIName)
+		var value, read, absent string
+		switch {
+		case a.Type == TypeBool && a.StateField != "":
+			value = "ValueBool"
+			read = fmt.Sprintf("getStateBool(obj, %q, %q)", a.StateField, a.APIName)
+			absent = fmt.Sprintf("(obj[%q] == nil && obj[%q] == nil)", a.StateField, a.APIName)
+		case a.Type == TypeBool:
+			value, read, absent = "ValueBool", fmt.Sprintf("getBool(obj, %q)", a.APIName), fmt.Sprintf("obj[%q] == nil", a.APIName)
+		case a.Type == TypeInt:
+			value, read, absent = "ValueInt64", fmt.Sprintf("getInt(obj, %q)", a.APIName), fmt.Sprintf("obj[%q] == nil", a.APIName)
 		default:
 			continue
 		}
 		f := a.Field
 		fmt.Fprintf(b, "\tif !cfg.%s.IsUnknown() && !cfg.%s.IsNull() && !cfg.%s.Equal(state.%s) {\n", f, f, f, f)
 		fmt.Fprintf(b, "\t\tprev, want := reflected, cfg.%s.%s()\n", f, value)
-		fmt.Fprintf(b, "\t\treflected = func(obj map[string]any) bool {\n\t\t\treturn prev(obj) && (obj[%q] == nil || %s == want)\n\t\t}\n\t}\n", a.APIName, read)
+		fmt.Fprintf(b, "\t\treflected = func(obj map[string]any) bool {\n\t\t\treturn prev(obj) && (%s || %s == want)\n\t\t}\n\t}\n", absent, read)
 	}
 }
 
