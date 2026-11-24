@@ -76,12 +76,39 @@ type Attribute struct {
 	// normalized) strings. A non-empty set is still sent as a full replace, and
 	// New-* never sends a delta.
 	Delta bool
-	// StateField names a string read-back property that encodes a bool attribute
-	// as "Enabled"/"Disabled" (e.g. a rule's State). The read maps
-	// StateField == "Enabled" (case-insensitive) to true and falls back to the
-	// bool APIName property when StateField is absent from the object. TypeBool
-	// only.
+	// StateField names a string read-back property the attribute is read from
+	// instead of APIName.
+	//
+	// TypeBool: the property encodes the bool, by default as "Enabled"/"Disabled"
+	// (e.g. a rule's State). The read maps StateField == StateValue
+	// (case-insensitive, default "Enabled") to true and falls back to the bool
+	// APIName property when StateField is absent from the object.
+	//
+	// TypeString: requires StateMap.
 	StateField string
+	// StateValue is the StateField value that reads as true for a TypeBool
+	// attribute, e.g. "SharedMailbox" for New-Mailbox -Shared read from
+	// RecipientTypeDetails. Empty means "Enabled".
+	StateValue string
+	// StateMap reads a TypeString attribute from StateField through a value map
+	// (keys compared case-insensitively); absent or unmapped values read as "".
+	// E.g. Set-Mailbox -Type from RecipientTypeDetails: {"SharedMailbox":
+	// "Shared", "UserMailbox": "Regular", ...}. The Update refresh waits until the
+	// mapped value shows the write.
+	StateMap map[string]string
+	// ChangesWith lists the TF names of attributes whose change also changes
+	// this attribute's read-back value (e.g. Set-Mailbox -Type changes the
+	// shared/room switches read from RecipientTypeDetails). When one of them
+	// changes and this attribute is unconfigured, the plan marks it unknown
+	// instead of keeping the state value, so the apply reads it back. TypeBool,
+	// Computed only.
+	ChangesWith []string
+	// ChangeError makes a planned change of a Replace attribute on an existing
+	// object fail the plan with this message instead of replacing it, for
+	// attributes whose replacement destroys data (e.g. a mailbox type switch).
+	// Leaving the attribute unconfigured never fails. Destroying and re-creating
+	// the object stays possible as a separate step. TypeBool only.
+	ChangeError string
 	// Toggle manages a bool attribute through companion Enable-/Disable- cmdlets
 	// (e.g. Enable-SafeLinksRule / Disable-SafeLinksRule -Identity) because
 	// Set-* does not accept it. The attribute is updated in place: after the main
