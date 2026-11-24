@@ -807,9 +807,11 @@ func genHelpers(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg s
 	fmt.Fprintf(b, "func (r *%s) reconcileState(cfg, read *%s) {\n", recv, model)
 	for _, a := range r.Attributes {
 		fmt.Fprintf(b, "\tread.%s = reconcile.%s(cfg.%s, read.%s)\n", a.Field, a.keepFn(), a.Field, a.Field)
-		if a.WriteOnly && a.Computed {
+		if a.WriteOnly && !a.Required {
 			// Nothing reads a write-only value back, so an unconfigured one is
 			// still unknown here; state must hold a known value after apply.
+			// Every non-Required attribute is Optional+Computed in the schema
+			// (modeFields), whatever a.Computed says, so key on Required.
 			null := "types." + a.tfType() + "Null()"
 			if a.Type == TypeStringSet {
 				null = "types.SetNull(types.StringType)"

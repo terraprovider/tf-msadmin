@@ -46,7 +46,7 @@ type Attribute struct {
 	// read (e.g. a site script's Content). The generated readInto skips it, so a
 	// refresh never clobbers the configured/state value; create/update still send
 	// it and reconcile keeps the configured value authoritative. An unconfigured
-	// Optional+Computed one is stored as null after apply. With Replace on a
+	// non-Required one is stored as null after apply. With Replace on a
 	// TypeString, an empty state value (e.g. after import) does not force
 	// replacement: setting the value then only records it.
 	WriteOnly bool
