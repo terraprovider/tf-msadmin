@@ -66,7 +66,20 @@ func Generate(cfg Config, resources []Resource) ([]File, error) {
 
 // validate rejects attribute combinations the emitter cannot render correctly.
 func (r Resource) validate() error {
+	names := map[string]bool{}
 	for _, a := range r.Attributes {
+		names[a.TFName] = true
+	}
+	if r.Members != nil {
+		names[r.Members.TFName] = true
+	}
+	for _, a := range r.Attributes {
+		for _, n := range a.ChangesWith {
+			if n == a.TFName || !names[n] {
+				// A missing name would fail every plan at runtime (path not found).
+				return fmt.Errorf("attribute %s: ChangesWith %q is not another attribute of %s", a.TFName, n, r.TFName)
+			}
+		}
 		// Object is the System.Object JSON round-trip (a string attribute written
 		// into an `any` field). A param whose declared type is bool/int/list must be
 		// modelled as that type with Object=false, so it takes the typed write path.
@@ -550,7 +563,6 @@ func (a Attribute) writeStmt(pv string, site writeSite) string {
 	}
 }
 
-// readAssign renders the readInto assignment.
 // customStateValue reports whether a StateField bool matches a value other than
 // "Enabled", which getStateBool (the provider helper) cannot express.
 func (a Attribute) customStateValue() bool {
@@ -595,6 +607,7 @@ func (a Attribute) stateStringReflects(want string) string {
 	return "stateStringReflects(" + a.stateMapArgs() + ", " + want + ")"
 }
 
+// readAssign renders the readInto assignment.
 func (a Attribute) readAssign() string {
 	if len(a.StateMap) > 0 {
 		return fmt.Sprintf("m.%s = types.StringValue(%s)", a.Field, a.stateStringRead())

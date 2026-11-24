@@ -518,9 +518,11 @@ func genUpdate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 	// (System.Object/JSON) attributes are excluded: they read back via getObjectJSON
 	// (not getString) and the API normalizes them (key case, added fields), so a
 	// getString-based reflection would never match and would stall the refresh.
+	// StateMap strings are read from StateField, not APIName, so genScalarReflected
+	// checks them through the map instead.
 	fmt.Fprintf(b, "\treflected := reconcile.ReflectsFields(map[string]types.String{\n")
 	for _, a := range r.Attributes {
-		if a.InUpdate && a.Type == TypeString && !a.Object {
+		if a.InUpdate && a.Type == TypeString && !a.Object && len(a.StateMap) == 0 {
 			fmt.Fprintf(b, "\t\t%q: cfg.%s,\n", a.APIName, a.Field)
 		}
 	}

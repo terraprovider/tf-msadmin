@@ -95,7 +95,9 @@ func TestStateAttributeValidation(t *testing.T) {
 		"StateMap on a bool":                      {TFName: "x", Field: "X", Type: TypeBool, StateField: "S", StateMap: map[string]string{"a": "b"}},
 		"ChangeError without Replace":             {TFName: "x", Field: "X", Type: TypeBool, ChangeError: "no"},
 		"ChangeError on a string":                 {TFName: "x", Field: "X", Type: TypeString, Replace: true, ChangeError: "no"},
-		"ChangesWith on a non-computed bool":      {TFName: "x", Field: "X", Type: TypeBool, Required: true, ChangesWith: []string{"type"}},
+		"ChangesWith on a non-computed bool":      {TFName: "x", Field: "X", Type: TypeBool, Required: true, ChangesWith: []string{"name"}},
+		"ChangesWith naming no attribute":         {TFName: "x", Field: "X", Type: TypeBool, Computed: true, ChangesWith: []string{"typo"}},
+		"ChangesWith naming itself":               {TFName: "x", Field: "X", Type: TypeBool, Computed: true, ChangesWith: []string{"x"}},
 	}
 	for name, a := range cases {
 		cfg, r := typedFixture()
@@ -112,7 +114,26 @@ func TestChangesWithPlansUnknown(t *testing.T) {
 	wantAll(t, src, `boolplanmodifier.UseStateForUnknown(), unknownIfChangedBool("type")}`)
 	wantAll(t, reg,
 		"func unknownIfChangedBool(attrs ...string) planmodifier.Bool {",
-		"if planned != nil && !planned.IsUnknown() && !planned.Equal(prior) {\n\t\t\tresp.PlanValue = types.BoolUnknown()",
+		// An unconfigured linked attribute keeps its state value; a configured
+		// unknown one (another resource's output) may change.
+		"if configured == nil || configured.IsNull() {\n\t\t\tcontinue\n\t\t}",
+		"if configured.IsUnknown() || planned == nil || !planned.Equal(prior) {\n\t\t\tresp.PlanValue = types.BoolUnknown()",
 		"\t\"github.com/hashicorp/terraform-plugin-framework/attr\"\n",
 	)
+}
+
+// A non-Object StateMap string is read from StateField, so the Update wait must
+// not also compare its raw APIName property, which the read never uses.
+func TestStateMapNotWaitedOnByAPIName(t *testing.T) {
+	cfg, r := mailboxTypeFixture()
+	for i := range r.Attributes {
+		if r.Attributes[i].TFName == "type" {
+			r.Attributes[i].Object = false
+		}
+	}
+	src, _ := genFiles(t, cfg, r)
+	wantAll(t, src, "return prev(obj) && stateStringReflects(")
+	if strings.Contains(src, `"Type": cfg.Type`) {
+		t.Error("the Update wait compares a StateMap attribute's APIName")
+	}
 }
