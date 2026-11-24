@@ -196,7 +196,7 @@ func genCreate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 	// adopt the existing object by applying Set and reading back — no manual
 	// `terraform import` needed. Custom identities fall through to the New path.
 	if r.AdoptIdentity != "" {
-		genAdoptBranch(b, r, svc, pkg)
+		genAdoptBranch(b, cfg, r, svc, pkg)
 	}
 	if r.SparseWrite {
 		// Sparse create: send only the fields the operator actually set. Every
@@ -251,7 +251,7 @@ func genCreate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 	// isNotFound: a write referencing an object created moments earlier in the
 	// same apply can hit a directory server the object hasn't replicated to yet.
 	// Read/Delete stay fast on not-found (they use it to detect real removal).
-	fmt.Fprintf(b, "\tres, err := resourcex.RetryWriteCall(ctx, consistency.Config{}, %s.%s, p, isNotFound)\n", svc, r.Create.Method)
+	fmt.Fprintf(b, "\tres, err := %s\n", cfg.writeCall(svc, r.Create.Method, "p"))
 	fmt.Fprintf(b, "\tif err != nil {\n\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\treturn\n\t}\n", r.cmdlet("New")+" failed")
 	fmt.Fprintf(b, "\tobj := firstObject(res.Value)\n")
 	fmt.Fprintf(b, "\tcfg := plan\n")
@@ -287,7 +287,7 @@ func genCreate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 // operator declares it, adopt it by applying Set (like genConfigCreate) and
 // reading back, then return before the New path. Delete drops it from state
 // instead of removing it (see genDelete).
-func genAdoptBranch(b *bytes.Buffer, r Resource, svc, pkg string) {
+func genAdoptBranch(b *bytes.Buffer, cfg Config, r Resource, svc, pkg string) {
 	idField := r.Update.IdentityField
 	if idField == "" {
 		idField = "Identity"
@@ -310,7 +310,7 @@ func genAdoptBranch(b *bytes.Buffer, r Resource, svc, pkg string) {
 		}
 	}
 	fmt.Fprintf(b, "\t\tif resp.Diagnostics.HasError() {\n\t\t\treturn\n\t\t}\n")
-	fmt.Fprintf(b, "\t\tif _, err := resourcex.RetryWriteCall(ctx, consistency.Config{}, %s.%s, sp, isNotFound); err != nil {\n\t\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\t\treturn\n\t\t}\n", svc, r.Update.Method, r.cmdlet("Set")+" failed")
+	fmt.Fprintf(b, "\t\tif _, err := %s; err != nil {\n\t\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\t\treturn\n\t\t}\n", cfg.writeCall(svc, r.Update.Method, "sp"), r.cmdlet("Set")+" failed")
 	fmt.Fprintf(b, "\t\tcfg := plan\n")
 	fmt.Fprintf(b, "\t\tident := plan.Identity.ValueString()\n")
 	fmt.Fprintf(b, "\t\tif !r.refresh(ctx, ident, &plan, &resp.Diagnostics, nil) {\n")
@@ -417,7 +417,7 @@ func genConfigCreate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, 
 		}
 	}
 	fmt.Fprintf(b, "\tif resp.Diagnostics.HasError() {\n\t\treturn\n\t}\n")
-	fmt.Fprintf(b, "\tif _, err := resourcex.RetryWriteCall(ctx, consistency.Config{}, %s.%s, sp, isNotFound); err != nil {\n\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\treturn\n\t}\n", svc, r.Update.Method, r.cmdlet("Set")+" failed")
+	fmt.Fprintf(b, "\tif _, err := %s; err != nil {\n\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\treturn\n\t}\n", cfg.writeCall(svc, r.Update.Method, "sp"), r.cmdlet("Set")+" failed")
 	fmt.Fprintf(b, "\tcfg := plan\n")
 	if r.Singleton {
 		fmt.Fprintf(b, "\tidentity := \"\"\n")
@@ -514,8 +514,8 @@ func genUpdate(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 		}
 	}
 	fmt.Fprintf(b, "\tif resp.Diagnostics.HasError() {\n\t\treturn\n\t}\n")
-	fmt.Fprintf(b, "\tif _, err := resourcex.RetryWriteCall(ctx, consistency.Config{}, %s.%s, sp, isNotFound); err != nil {\n\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\treturn\n\t}\n", svc, r.Update.Method, r.cmdlet("Set")+" failed")
-	genToggles(b, r, svc, pkg)
+	fmt.Fprintf(b, "\tif _, err := %s; err != nil {\n\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\treturn\n\t}\n", cfg.writeCall(svc, r.Update.Method, "sp"), r.cmdlet("Set")+" failed")
+	genToggles(b, cfg, r, svc, pkg)
 	fmt.Fprintf(b, "\tcfg := plan\n")
 	// reflected predicate over plain string attributes that were updated. Object
 	// (System.Object/JSON) attributes are excluded: they read back via getObjectJSON
@@ -565,7 +565,14 @@ func genDelete(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg st
 			r.Noun+" "+r.AdoptIdentity+" not deleted",
 			"The "+r.AdoptIdentity+" "+r.Noun+" is a built-in tenant singleton that cannot be removed. It has been dropped from Terraform state but remains unchanged in the tenant.")
 	}
-	fmt.Fprintf(b, "\tif _, err := %s.%s(ctx, %s.%s{%s: r.identityOf(state)}); err != nil {\n", svc, r.Delete.Method, pkg, r.Delete.Params, r.Delete.IdentityField)
+	remove := fmt.Sprintf("%s.%s(ctx, %s.%s{%s: r.identityOf(state)})", svc, r.Delete.Method, pkg, r.Delete.Params, r.Delete.IdentityField)
+	if cfg.WriteConflict != "" {
+		// Remove has no not-found retry (not-found means already gone), only the
+		// conflict retry.
+		fmt.Fprintf(b, "\tif err := resourcex.RetryConflict(ctx, resourcex.ConflictConfig{}, func(ctx context.Context) error {\n\t\t_, err := %s\n\t\treturn err\n\t}, %s); err != nil {\n", remove, cfg.WriteConflict)
+	} else {
+		fmt.Fprintf(b, "\tif _, err := %s; err != nil {\n", remove)
+	}
 	fmt.Fprintf(b, "\t\tif !isNotFound(err) {\n\t\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\t}\n\t}\n}\n\n", r.cmdlet("Remove")+" failed")
 }
 
@@ -835,7 +842,7 @@ func genHelpers(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg s
 // companion call for each Toggle attribute whose planned value changed (see
 // Attribute.Toggle). It targets the same identity as the Set call and uses the
 // same not-found retry.
-func genToggles(b *bytes.Buffer, r Resource, svc, pkg string) {
+func genToggles(b *bytes.Buffer, cfg Config, r Resource, svc, pkg string) {
 	for _, a := range r.Attributes {
 		t := a.Toggle
 		if t == nil {
@@ -847,8 +854,8 @@ func genToggles(b *bytes.Buffer, r Resource, svc, pkg string) {
 		}
 		f := a.Field
 		call := func(method, params string) string {
-			return fmt.Sprintf("if _, err := resourcex.RetryWriteCall(ctx, consistency.Config{}, %s.%s, %s.%s{%s: id}, isNotFound); err != nil {\n\t\t\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\t\t\treturn\n\t\t\t}\n",
-				svc, method, pkg, params, idf, cmdletName(method)+" failed")
+			return fmt.Sprintf("if _, err := %s; err != nil {\n\t\t\t\tresp.Diagnostics.AddError(%q, err.Error())\n\t\t\t\treturn\n\t\t\t}\n",
+				cfg.writeCall(svc, method, fmt.Sprintf("%s.%s{%s: id}", pkg, params, idf)), cmdletName(method)+" failed")
 		}
 		fmt.Fprintf(b, "\tif !plan.%s.IsUnknown() && !plan.%s.IsNull() && !plan.%s.Equal(state.%s) {\n", f, f, f, f)
 		fmt.Fprintf(b, "\t\tif plan.%s.ValueBool() {\n\t\t\t%s\t\t} else {\n\t\t\t%s\t\t}\n\t}\n", f, call(t.EnableMethod, t.EnableParams), call(t.DisableMethod, t.DisableParams))

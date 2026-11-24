@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"go/format"
+	"go/token"
 	"sort"
 	"strings"
 )
@@ -19,6 +20,9 @@ type File struct {
 // gofmt-formatted; a formatting error surfaces the offending source for
 // debugging.
 func Generate(cfg Config, resources []Resource) ([]File, error) {
+	if cfg.WriteConflict != "" && !token.IsIdentifier(cfg.WriteConflict) {
+		return nil, fmt.Errorf("WriteConflict %q is not a Go identifier", cfg.WriteConflict)
+	}
 	for _, r := range resources {
 		if err := r.validate(); err != nil {
 			return nil, fmt.Errorf("%s: %w", r.Noun, err)
@@ -437,6 +441,16 @@ func (a Attribute) schemaAttr() string {
 		b.WriteString("}")
 	}
 	return b.String()
+}
+
+// writeCall renders the retrying call of a main write (New, Set or a Toggle
+// companion) with params expression p: RetryWriteCall on isNotFound, or with
+// Config.WriteConflict set, RetryConflictCall, which adds the conflict retry.
+func (c Config) writeCall(svc, method, p string) string {
+	if c.WriteConflict != "" {
+		return fmt.Sprintf("resourcex.RetryConflictCall(ctx, consistency.Config{}, %s.%s, %s, isNotFound, %s)", svc, method, p, c.WriteConflict)
+	}
+	return fmt.Sprintf("resourcex.RetryWriteCall(ctx, consistency.Config{}, %s.%s, %s, isNotFound)", svc, method, p)
 }
 
 func (a Attribute) modeFields() string {
