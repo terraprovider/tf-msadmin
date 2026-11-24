@@ -83,9 +83,16 @@ func TestGroupAssignmentGolden(t *testing.T) {
 }
 
 func TestGroupAssignmentValidate(t *testing.T) {
-	_, r := groupAssignmentFixture()
-	r.Assignment = false
-	if _, err := Generate(Config{}, []Resource{r}); err == nil {
-		t.Error("AssignmentGroup without Assignment must be rejected")
+	for name, mutate := range map[string]func(*Resource){
+		"no Assignment":           func(r *Resource) { r.Assignment = false },
+		"no AssignmentPolicyType": func(r *Resource) { r.AssignmentPolicyType = "" },
+		"no Create.Method":        func(r *Resource) { r.Create.Method = "" },
+		"no Create.Params":        func(r *Resource) { r.Create.Params = "" },
+	} {
+		cfg, r := groupAssignmentFixture()
+		mutate(&r)
+		if _, err := Generate(cfg, []Resource{r}); err == nil || !strings.Contains(err.Error(), "AssignmentGroup requires") {
+			t.Errorf("%s: want the AssignmentGroup validation error, got %v", name, err)
+		}
 	}
 }

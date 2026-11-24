@@ -233,8 +233,12 @@ type Resource struct {
 	//
 	//   - Create/Update call the grant op with the group in Create.IdentityField
 	//     (default "Group"), PolicyName and Rank (*int64), then poll
-	//     AssignmentGroupRead until the name and the rank match, and fail if they
-	//     never do (Teams places an out-of-range rank last).
+	//     AssignmentGroupRead until the name and the rank match. Teams places a
+	//     rank beyond the number of group assignments of the type last: that is a
+	//     warning (the next refresh shows it as drift), so lower ranks created
+	//     later in the same apply converge on the next run. A grant that never
+	//     shows the name fails the apply; after Create the state is still saved,
+	//     so Terraform taints the resource.
 	//   - Read stores the rank Teams reports, so a rank renumbered by another
 	//     assignment of the same type is drift; an empty name removes the resource.
 	//   - Delete grants with no PolicyName (null unassign) and waits until the read

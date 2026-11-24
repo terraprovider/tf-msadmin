@@ -31,6 +31,8 @@ type harness struct {
 	r   *meetingPolicyGroupAssignmentResource
 	svc *cs.Service
 	s   schema.Schema
+	// diags of the last create/update
+	diags diag.Diagnostics
 }
 
 func newHarness(t *testing.T, lag int) *harness {
@@ -76,6 +78,7 @@ func (h *harness) create(group, name string, rank int64) (tfsdk.State, string) {
 	h.t.Helper()
 	resp := resource.CreateResponse{State: tfsdk.State{Schema: h.s, Raw: h.value(nil, nil, nil, nil)}}
 	h.r.Create(h.ctx, resource.CreateRequest{Plan: tfsdk.Plan{Schema: h.s, Raw: h.value(nil, &group, &name, &rank)}}, &resp)
+	h.diags = resp.Diagnostics
 	return resp.State, errs(resp.Diagnostics)
 }
 
@@ -85,7 +88,18 @@ func (h *harness) update(st tfsdk.State, name string, rank int64) (tfsdk.State, 
 	id, group := m.ID.ValueString(), m.GroupID.ValueString()
 	resp := resource.UpdateResponse{State: st}
 	h.r.Update(h.ctx, resource.UpdateRequest{State: st, Plan: tfsdk.Plan{Schema: h.s, Raw: h.value(&id, &group, &name, &rank)}}, &resp)
+	h.diags = resp.Diagnostics
 	return resp.State, errs(resp.Diagnostics)
+}
+
+// warned reports whether the last create/update returned a warning with this summary.
+func (h *harness) warned(summary string) bool {
+	for _, w := range h.diags.Warnings() {
+		if w.Summary() == summary {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *harness) read(st tfsdk.State) tfsdk.State {
@@ -173,15 +187,106 @@ func TestLifecycle(t *testing.T) {
 	}
 }
 
-// Teams places a rank beyond the number of assignments last; the apply must
-// fail instead of storing the unapplied rank.
-func TestUnreachableRank(t *testing.T) {
+// Teams places a rank beyond the number of assignments last (live-verified).
+// The apply warns instead of failing, and the next refresh shows the drift.
+func TestRankPlacedLast(t *testing.T) {
 	h := newHarness(t, 0)
 	if _, e := h.create(g1, "Foo", 1); e != "" {
 		t.Fatal(e)
 	}
-	_, e := h.create(g2, "Bar", 5)
+	before := h.svc.Reads
+	b, e := h.create(g2, "Bar", 5)
+	if e != "" || !h.warned("Rank placed last") {
+		t.Fatalf("want a rank warning and no error, got error %q, warnings %v", e, h.diags.Warnings())
+	}
+	// The placed-last read differs from the pre-grant one, so the wait ends
+	// early: one pre-grant read plus the consecutive reads.
+	if n, want := h.svc.Reads-before, 1+resourcex.ReflectedReads; n != want {
+		t.Fatalf("create read %d times, want %d", n, want)
+	}
+	h.want(h.read(b), "Bar", 2)
+}
+
+// Terraform picks the order of independent creates; the lock only serializes
+// them. A higher rank created first is placed last, and once the lower rank
+// exists the refresh matches the configuration.
+func TestCreateOrder(t *testing.T) {
+	h := newHarness(t, 2)
+	b, e := h.create(g2, "Bar", 2)
+	if e != "" || !h.warned("Rank placed last") {
+		t.Fatalf("rank 2 first: want a warning and no error, got %q", e)
+	}
+	a, e := h.create(g1, "Foo", 1)
+	if e != "" || h.warned("Rank placed last") {
+		t.Fatalf("rank 1 second: got error %q, warnings %v", e, h.diags.Warnings())
+	}
+	h.want(h.read(a), "Foo", 1)
+	h.want(h.read(b), "Bar", 2)
+}
+
+// Moving an assignment down within range: while reads still return the
+// pre-grant state, the old lower rank must not be taken for "placed last".
+func TestMoveDownWithLag(t *testing.T) {
+	h := newHarness(t, 2)
+	a, _ := h.create(g1, "Foo", 1)
+	h.create(g2, "Bar", 2)
+	h.create(g3, "Baz", 3)
+	a, e := h.update(a, "Foo", 3)
+	if e != "" || h.warned("Rank placed last") {
+		t.Fatalf("want no error and no warning, got error %q, warnings %v", e, h.diags.Warnings())
+	}
+	h.want(h.read(a), "Foo", 3)
+}
+
+// Removing the lower-ranked assignment leaves the other at rank 1. Re-applying
+// its unchanged rank 2 reads the same as before the grant, so it uses the
+// whole budget, then warns instead of failing.
+func TestReapplyUnreachableRank(t *testing.T) {
+	h := newHarness(t, 0)
+	a, _ := h.create(g1, "Foo", 1)
+	b, _ := h.create(g2, "Bar", 2)
+	if e := h.delete(a); e != "" {
+		t.Fatal(e)
+	}
+	b = h.read(b)
+	h.want(b, "Bar", 1)
+	if _, e := h.update(b, "Bar", 2); e != "" || !h.warned("Rank placed last") {
+		t.Fatalf("want a rank warning and no error, got error %q, warnings %v", e, h.diags.Warnings())
+	}
+}
+
+// A grant that never shows up fails the create, but the state is saved so
+// Terraform taints the resource instead of losing track of the grant.
+func TestCreateWaitFailsKeepsState(t *testing.T) {
+	h := newHarness(t, 1000)
+	st, e := h.create(g1, "Foo", 1)
 	if !strings.Contains(e, "did not reach the requested state") {
+		t.Fatalf("want a did-not-reach error, got %q", e)
+	}
+	if st.Raw.IsNull() {
+		t.Fatal("state must be saved after a successful grant, so Terraform taints the resource")
+	}
+	h.want(st, "Foo", 1)
+}
+
+// A failed update keeps the prior state.
+func TestUpdateWaitFails(t *testing.T) {
+	h := newHarness(t, 0)
+	a, _ := h.create(g1, "Foo", 1)
+	h.svc.Lag = 1000
+	st, e := h.update(a, "Baz", 1)
+	if !strings.Contains(e, "did not reach the requested state") {
+		t.Fatalf("want a did-not-reach error, got %q", e)
+	}
+	h.want(st, "Foo", 1)
+}
+
+// The wait needs resourcex.ReflectedReads consecutive matching reads: one
+// matching read at the very end of the budget is not enough.
+func TestSingleMatchAtOverrun(t *testing.T) {
+	h := newHarness(t, 0)
+	h.svc.Lag = meetingPolicyGroupAssignmentResourceWait.Attempts - 1
+	if _, e := h.create(g1, "Foo", 1); !strings.Contains(e, "did not reach the requested state") {
 		t.Fatalf("want a did-not-reach error, got %q", e)
 	}
 }

@@ -4,6 +4,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync"
@@ -36,13 +37,20 @@ var (
 // write sees a transient rank.
 var meetingPolicyGroupAssignmentResourceMu sync.Map
 
-// meetingPolicyGroupAssignmentResourceWait is the poll budget for a write to become visible. Grants surface after
-// ~30 s; a variable so tests can shorten it.
+// meetingPolicyGroupAssignmentResourceWait is the poll budget for a write to become visible. Group grants showed
+// up on the first read (2-5 s) in live tests; re-applying a rank that Teams
+// already placed last uses the whole budget. A variable so tests can shorten it.
 var meetingPolicyGroupAssignmentResourceWait = consistency.Config{Attempts: 20, Delay: 4 * time.Second}
 
 var meetingPolicyGroupAssignmentResourceUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 type meetingPolicyGroupAssignmentResource struct{ client *clients.Client }
+
+// meetingPolicyGroupAssignmentResourceSeen is one read of the group's assignment (name == "" means none).
+type meetingPolicyGroupAssignmentResourceSeen struct {
+	name string
+	rank int64
+}
 
 // NewMeetingPolicyGroupAssignmentResource manages the assignment of a TeamsMeetingPolicy instance to an Entra group (Grant-CsTeamsMeetingPolicy -Group).
 func NewMeetingPolicyGroupAssignmentResource() resource.Resource {
@@ -67,7 +75,7 @@ func (r *meetingPolicyGroupAssignmentResource) Schema(_ context.Context, _ resou
 			"id":          schema.StringAttribute{Computed: true, Description: "Assignment identifier (the group's object id).", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
 			"group_id":    schema.StringAttribute{Required: true, Description: "Object id of the Entra group the policy is assigned to. Changing it forces replacement.", PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}},
 			"policy_name": schema.StringAttribute{Required: true, Description: "Name of the TeamsMeetingPolicy instance to assign to the group."},
-			"rank":        schema.Int64Attribute{Required: true, Description: "One-based rank among the group assignments of TeamsMeetingPolicy; a user in several groups gets the policy of the lowest rank. Teams keeps ranks dense, so assigning another group at an occupied rank shifts this one, which shows up as drift."},
+			"rank":        schema.Int64Attribute{Required: true, Description: "One-based rank among the group assignments of TeamsMeetingPolicy; a user in several groups gets the policy of the lowest rank. Teams keeps ranks dense: assigning another group at an occupied rank shifts this one, which shows up as drift. A rank beyond the number of group assignments is placed last; the apply warns, and the difference shows up as drift until the lower ranks exist."},
 		},
 	}
 }
@@ -99,19 +107,25 @@ func (r *meetingPolicyGroupAssignmentResource) ValidateConfig(ctx context.Contex
 func (r *meetingPolicyGroupAssignmentResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan meetingPolicyGroupAssignmentModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	if resp.Diagnostics.HasError() || !r.assign(ctx, &plan, &resp.Diagnostics) {
+	if resp.Diagnostics.HasError() {
 		return
 	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	// Saved even when the wait fails, so Terraform taints the resource
+	// instead of losing track of the grant.
+	if granted, _ := r.assign(ctx, &plan, &resp.Diagnostics); granted {
+		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	}
 }
 
 func (r *meetingPolicyGroupAssignmentResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var plan meetingPolicyGroupAssignmentModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	if resp.Diagnostics.HasError() || !r.assign(ctx, &plan, &resp.Diagnostics) {
+	if resp.Diagnostics.HasError() {
 		return
 	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	if _, ok := r.assign(ctx, &plan, &resp.Diagnostics); ok {
+		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	}
 }
 
 func (r *meetingPolicyGroupAssignmentResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -122,20 +136,20 @@ func (r *meetingPolicyGroupAssignmentResource) Read(ctx context.Context, req res
 	}
 	defer r.lock()()
 	group := state.GroupID.ValueString()
-	name, rank, err := r.client.CS.GroupPolicyAssignment(ctx, group, "TeamsMeetingPolicy")
+	got, err := r.read(ctx, group)
 	if err != nil {
 		resp.Diagnostics.AddError("reading the group policy assignment failed", err.Error())
 		return
 	}
-	if name == "" {
+	if got.name == "" {
 		resp.State.RemoveResource(ctx)
 		return
 	}
 	// The API compares names case-insensitively; keep the configured spelling.
-	if !strings.EqualFold(state.PolicyName.ValueString(), name) {
-		state.PolicyName = types.StringValue(name)
+	if !strings.EqualFold(state.PolicyName.ValueString(), got.name) {
+		state.PolicyName = types.StringValue(got.name)
 	}
-	state.Rank = types.Int64Value(rank)
+	state.Rank = types.Int64Value(got.rank)
 	state.ID = types.StringValue(group)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
@@ -154,7 +168,11 @@ func (r *meetingPolicyGroupAssignmentResource) Delete(ctx context.Context, req r
 		}
 		return
 	}
-	r.waitFor(ctx, group, func(name string, _ int64) bool { return name == "" }, "the group still has the policy assigned", &resp.Diagnostics)
+	if _, ok, err := r.waitFor(ctx, group, func(s meetingPolicyGroupAssignmentResourceSeen) bool { return s.name == "" }); err != nil {
+		resp.Diagnostics.AddError("reading the group policy assignment failed", err.Error())
+	} else if !ok {
+		resp.Diagnostics.AddError("group policy assignment was not removed", "Teams still reports the group's assignment after the unassign.")
+	}
 }
 
 func (r *meetingPolicyGroupAssignmentResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
@@ -169,39 +187,68 @@ func (r *meetingPolicyGroupAssignmentResource) lock() func() {
 	return mu.Unlock
 }
 
-func (r *meetingPolicyGroupAssignmentResource) assign(ctx context.Context, plan *meetingPolicyGroupAssignmentModel, diags *diag.Diagnostics) bool {
+// assign grants the planned policy at the planned rank and waits until the read
+// reports both. granted: the grant call succeeded; ok: the result was confirmed.
+func (r *meetingPolicyGroupAssignmentResource) assign(ctx context.Context, plan *meetingPolicyGroupAssignmentModel, diags *diag.Diagnostics) (granted, ok bool) {
 	defer r.lock()()
 	group := plan.GroupID.ValueString()
 	want := plan.PolicyName.ValueString()
 	rank := plan.Rank.ValueInt64()
-	if _, err := r.client.CS.GrantCsTeamsMeetingPolicy(ctx, cs.GrantCsTeamsMeetingPolicyParams{Group: group, PolicyName: want, Rank: &rank}); err != nil {
-		diags.AddError("Grant-CsTeamsMeetingPolicy -Group failed", err.Error())
-		return false
-	}
-	if !r.waitFor(ctx, group, func(name string, got int64) bool { return strings.EqualFold(name, want) && got == rank }, "the assignment did not reach the requested policy and rank; a rank beyond the number of group assignments of this type is placed last", diags) {
-		return false
-	}
 	plan.ID = types.StringValue(group)
-	return true
-}
-
-func (r *meetingPolicyGroupAssignmentResource) waitFor(ctx context.Context, group string, done func(name string, rank int64) bool, timeout string, diags *diag.Diagnostics) bool {
-	type seen struct {
-		name string
-		rank int64
-	}
-	reflected := func(s seen) bool { return done(s.name, s.rank) }
-	got, _, err := resourcex.LoadUntil(ctx, meetingPolicyGroupAssignmentResourceWait, func(ctx context.Context) (seen, bool, error) {
-		name, rank, gerr := r.client.CS.GroupPolicyAssignment(ctx, group, "TeamsMeetingPolicy")
-		return seen{name, rank}, true, gerr
-	}, reflected)
+	before, err := r.read(ctx, group)
 	if err != nil {
 		diags.AddError("reading the group policy assignment failed", err.Error())
-		return false
+		return false, false
 	}
-	if !reflected(got) {
-		diags.AddError("group policy assignment did not reach the requested state", timeout)
-		return false
+	if _, err := r.client.CS.GrantCsTeamsMeetingPolicy(ctx, cs.GrantCsTeamsMeetingPolicyParams{Group: group, PolicyName: want, Rank: &rank}); err != nil {
+		diags.AddError("Grant-CsTeamsMeetingPolicy -Group failed", err.Error())
+		return false, false
 	}
-	return true
+	// Teams honours a rank up to the number of group assignments of the type
+	// and places a higher one last, so the requested name at a lower rank is
+	// that outcome. It only ends the wait early when it differs from the
+	// pre-grant read, which a stale read would repeat.
+	placedLast := func(s meetingPolicyGroupAssignmentResourceSeen) bool {
+		return strings.EqualFold(s.name, want) && s.rank < rank
+	}
+	got, ok, err := r.waitFor(ctx, group, func(s meetingPolicyGroupAssignmentResourceSeen) bool {
+		return strings.EqualFold(s.name, want) && s.rank == rank || placedLast(s) && s != before
+	})
+	if err != nil {
+		diags.AddError("reading the group policy assignment failed", err.Error())
+		return true, false
+	}
+	// On an overrun, a read that still equals the pre-grant one at a lower rank
+	// is a rank that was already placed last (re-applying an unreachable rank).
+	if !ok && !placedLast(got) {
+		diags.AddError("group policy assignment did not reach the requested state", fmt.Sprintf("After Grant-CsTeamsMeetingPolicy -Group, Teams reports policy %q at rank %d; requested %q at rank %d.", got.name, got.rank, want, rank))
+		return true, false
+	}
+	if got.rank != rank {
+		diags.AddAttributeWarning(path.Root("rank"), "Rank placed last", fmt.Sprintf("Teams reports the assignment at rank %d instead of %d. Teams places a rank beyond the number of TeamsMeetingPolicy group assignments last. The next refresh shows the difference as drift, and an apply sets rank %d once the lower ranks exist.", got.rank, rank, rank))
+	}
+	return true, true
+}
+
+func (r *meetingPolicyGroupAssignmentResource) read(ctx context.Context, group string) (meetingPolicyGroupAssignmentResourceSeen, error) {
+	name, rank, err := r.client.CS.GroupPolicyAssignment(ctx, group, "TeamsMeetingPolicy")
+	return meetingPolicyGroupAssignmentResourceSeen{name, rank}, err
+}
+
+// waitFor polls until done holds on resourcex.ReflectedReads consecutive reads
+// and returns the last read and whether it did.
+func (r *meetingPolicyGroupAssignmentResource) waitFor(ctx context.Context, group string, done func(meetingPolicyGroupAssignmentResourceSeen) bool) (meetingPolicyGroupAssignmentResourceSeen, bool, error) {
+	streak := 0
+	got, _, err := resourcex.LoadUntil(ctx, meetingPolicyGroupAssignmentResourceWait, func(ctx context.Context) (meetingPolicyGroupAssignmentResourceSeen, bool, error) {
+		s, err := r.read(ctx, group)
+		return s, true, err
+	}, func(s meetingPolicyGroupAssignmentResourceSeen) bool {
+		if !done(s) {
+			streak = 0
+			return false
+		}
+		streak++
+		return true
+	})
+	return got, err == nil && streak >= resourcex.ReflectedReads, err
 }
