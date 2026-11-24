@@ -233,20 +233,27 @@ func (r *meetingPolicyGroupAssignmentResource) read(ctx context.Context, group s
 	return meetingPolicyGroupAssignmentResourceSeen{name, rank}, err
 }
 
-// waitFor polls until done holds on resourcex.ReflectedReads consecutive reads
-// and returns the last read and whether it did.
+// waitFor polls until done holds for the same state on resourcex.ReflectedReads
+// consecutive reads and returns the last read and whether it did.
 func (r *meetingPolicyGroupAssignmentResource) waitFor(ctx context.Context, group string, done func(meetingPolicyGroupAssignmentResourceSeen) bool) (meetingPolicyGroupAssignmentResourceSeen, bool, error) {
+	var last, prev meetingPolicyGroupAssignmentResourceSeen
 	streak := 0
-	got, _, err := resourcex.LoadUntil(ctx, meetingPolicyGroupAssignmentResourceWait, func(ctx context.Context) (meetingPolicyGroupAssignmentResourceSeen, bool, error) {
+	_, ok, err := consistency.RetryUntil(ctx, meetingPolicyGroupAssignmentResourceWait, func(ctx context.Context) (meetingPolicyGroupAssignmentResourceSeen, bool, error) {
 		s, err := r.read(ctx, group)
+		last = s
 		return s, true, err
 	}, func(s meetingPolicyGroupAssignmentResourceSeen) bool {
-		if !done(s) {
+		switch {
+		case !done(s):
 			streak = 0
 			return false
+		case streak > 0 && !(strings.EqualFold(s.name, prev.name) && s.rank == prev.rank):
+			streak = 1 // another state that satisfies done starts its own streak
+		default:
+			streak++
 		}
-		streak++
-		return true
+		prev = s
+		return streak >= resourcex.ReflectedReads
 	})
-	return got, err == nil && streak >= resourcex.ReflectedReads, err
+	return last, ok, err
 }

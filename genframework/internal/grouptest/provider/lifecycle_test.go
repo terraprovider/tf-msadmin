@@ -280,6 +280,27 @@ func TestMoveDownNeverVisible(t *testing.T) {
 	}
 }
 
+// Two different states that each satisfy the wait (the requested rank, then a
+// lower one that looks placed last) must not add up to one confirmation: each
+// state needs its own consecutive reads.
+func TestMixedOutcomesDoNotConfirm(t *testing.T) {
+	h := newHarness(t, 0)
+	a, _ := h.create(g1, "Foo", 1)
+	h.create(g2, "Bar", 2)
+	h.create(g3, "Baz", 3)
+	h.svc.AfterGrant = []cs.Read{{Name: "Foo", Rank: 3}, {Name: "Foo", Rank: 2}}
+	before := h.svc.Reads
+	a, e := h.update(a, "Foo", 3)
+	if e != "" || h.warned("Rank placed last") {
+		t.Fatalf("want no error and no warning, got error %q, warnings %v", e, h.diags.Warnings())
+	}
+	// pre-grant read + the two scripted reads + two consecutive reads of rank 3
+	if n, want := h.svc.Reads-before, 1+2+resourcex.ReflectedReads; n != want {
+		t.Fatalf("update read %d times, want %d", n, want)
+	}
+	h.want(h.read(a), "Foo", 3)
+}
+
 // A stale read that differs from the pre-grant read only in the name's case
 // is still stale, not "placed last".
 func TestStaleReadCaseOnly(t *testing.T) {

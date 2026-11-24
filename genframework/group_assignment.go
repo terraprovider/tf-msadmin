@@ -238,24 +238,33 @@ func genGroupAssignmentResource(cfg Config, r Resource) ([]byte, error) {
 	fmt.Fprintf(&b, "\tname, rank, err := %s.%s(ctx, group, %q)\n", svc, readFn, ptype)
 	fmt.Fprintf(&b, "\treturn %s{name, rank}, err\n}\n\n", seen)
 
-	// waitFor polls until done holds on resourcex.ReflectedReads consecutive
-	// reads (resourcex.LoadUntil) and returns the last read and whether it did.
-	// LoadUntil returns the last read on an overrun too, so the streak is
-	// counted here: a single matching read at the end of the budget is not
-	// enough. An empty name is a state (unassigned), not "not yet visible", so
-	// every read counts as present.
-	fmt.Fprintf(&b, "// waitFor polls until done holds on resourcex.ReflectedReads consecutive reads\n")
-	fmt.Fprintf(&b, "// and returns the last read and whether it did.\n")
+	// waitFor polls until done holds for the same state on
+	// resourcex.ReflectedReads consecutive reads and returns the last read and
+	// whether it did. It counts the streak itself (consistency.RetryUntil
+	// rather than resourcex.LoadUntil): a different state that also satisfies
+	// done (the requested rank vs. placed last) starts its own streak, and a
+	// single matching read at the end of the budget is not enough. An empty
+	// name is a state (unassigned), not "not yet visible", so every read
+	// counts as present.
+	fmt.Fprintf(&b, "// waitFor polls until done holds for the same state on resourcex.ReflectedReads\n")
+	fmt.Fprintf(&b, "// consecutive reads and returns the last read and whether it did.\n")
 	fmt.Fprintf(&b, "func (r *%s) waitFor(ctx context.Context, group string, done func(%s) bool) (%s, bool, error) {\n", recv, seen, seen)
+	fmt.Fprintf(&b, "\tvar last, prev %s\n", seen)
 	fmt.Fprintf(&b, "\tstreak := 0\n")
-	fmt.Fprintf(&b, "\tgot, _, err := resourcex.LoadUntil(ctx, %s, func(ctx context.Context) (%s, bool, error) {\n", wait, seen)
+	fmt.Fprintf(&b, "\t_, ok, err := consistency.RetryUntil(ctx, %s, func(ctx context.Context) (%s, bool, error) {\n", wait, seen)
 	fmt.Fprintf(&b, "\t\ts, err := r.read(ctx, group)\n")
+	fmt.Fprintf(&b, "\t\tlast = s\n")
 	fmt.Fprintf(&b, "\t\treturn s, true, err\n")
 	fmt.Fprintf(&b, "\t}, func(s %s) bool {\n", seen)
-	fmt.Fprintf(&b, "\t\tif !done(s) {\n\t\t\tstreak = 0\n\t\t\treturn false\n\t\t}\n")
-	fmt.Fprintf(&b, "\t\tstreak++\n\t\treturn true\n")
+	fmt.Fprintf(&b, "\t\tswitch {\n")
+	fmt.Fprintf(&b, "\t\tcase !done(s):\n\t\t\tstreak = 0\n\t\t\treturn false\n")
+	fmt.Fprintf(&b, "\t\tcase streak > 0 && !(strings.EqualFold(s.name, prev.name) && s.rank == prev.rank):\n")
+	fmt.Fprintf(&b, "\t\t\tstreak = 1 // another state that satisfies done starts its own streak\n")
+	fmt.Fprintf(&b, "\t\tdefault:\n\t\t\tstreak++\n\t\t}\n")
+	fmt.Fprintf(&b, "\t\tprev = s\n")
+	fmt.Fprintf(&b, "\t\treturn streak >= resourcex.ReflectedReads\n")
 	fmt.Fprintf(&b, "\t})\n")
-	fmt.Fprintf(&b, "\treturn got, err == nil && streak >= resourcex.ReflectedReads, err\n}\n")
+	fmt.Fprintf(&b, "\treturn last, ok, err\n}\n")
 
 	return gofmt(b.String())
 }

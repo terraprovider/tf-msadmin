@@ -19,6 +19,12 @@ type GrantCsTeamsMeetingPolicyParams struct {
 
 type entry struct{ group, name string }
 
+// Read is one scripted read result.
+type Read struct {
+	Name string
+	Rank int64
+}
+
 type Service struct {
 	mu      sync.Mutex
 	order   []entry // index+1 is the rank
@@ -28,6 +34,10 @@ type Service struct {
 	// StaleUpper returns names in upper case while a write is still propagating
 	// (a stale read that differs from the pre-grant read only in case).
 	StaleUpper bool
+	// AfterGrant is returned by the reads right after the next grant, one
+	// entry per read, before the normal view (intermediate replica states).
+	AfterGrant []Read
+	script     []Read
 	Reads      int
 	Grants     int
 }
@@ -36,6 +46,7 @@ func (s *Service) GrantCsTeamsMeetingPolicy(_ context.Context, p GrantCsTeamsMee
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Grants++
+	s.script, s.AfterGrant = s.AfterGrant, nil
 	s.visible, s.lagLeft = append([]entry(nil), s.order...), s.Lag
 	s.place(p.Group, p.PolicyName, p.Rank)
 	return nil, nil
@@ -70,6 +81,11 @@ func (s *Service) GroupPolicyAssignment(_ context.Context, group, policyType str
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Reads++
+	if len(s.script) > 0 {
+		r := s.script[0]
+		s.script = s.script[1:]
+		return r.Name, r.Rank, nil
+	}
 	view := s.order
 	stale := s.lagLeft > 0
 	if stale {
