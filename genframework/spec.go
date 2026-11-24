@@ -228,6 +228,33 @@ type Resource struct {
 	// func(ctx context.Context, user, policyType string) (string, error) (empty ⇒
 	// no explicit assignment). Defaults to "EffectiveUserPolicy" when empty.
 	AssignmentUserRead string
+	// AssignmentGroup switches an Assignment resource from a per-user grant to a
+	// group grant (Grant-Cs<Type> -Group <id> -PolicyName <name> -Rank <n>). The
+	// generated resource has `group_id` (Required, RequiresReplace, UUID),
+	// `policy_name` (Required) and `rank` (Required, >= 1, updatable):
+	//
+	//   - Create/Update call the grant op with the group in Create.IdentityField
+	//     (default "Group"), PolicyName and Rank (*int64), then poll
+	//     AssignmentGroupRead until the name and the rank match. Teams places a
+	//     rank beyond the number of group assignments of the type last: that is a
+	//     warning (the next refresh shows it as drift), so lower ranks created
+	//     later in the same apply converge on the next run. A grant that is not
+	//     confirmed on consecutive reads fails the apply, and so does re-applying
+	//     a rank that stays beyond that number (the read never changes); after
+	//     Create the state is still saved, so Terraform taints the resource.
+	//   - Read stores the rank Teams reports, so a rank renumbered by another
+	//     assignment of the same type is drift; an empty name removes the resource.
+	//   - Delete grants with no PolicyName (null unassign) and waits until the read
+	//     shows the assignment gone.
+	//
+	// Ranks are dense per policy type, so the resource serializes its calls per
+	// policy type within the provider process. Requires Assignment.
+	AssignmentGroup bool
+	// AssignmentGroupRead names the read helper on the bindings service that
+	// returns a group's assignment for AssignmentPolicyType, with signature
+	// func(ctx context.Context, groupID, policyType string) (name string, rank int64, err error)
+	// (name == "" ⇒ no assignment). Defaults to "GroupPolicyAssignment".
+	AssignmentGroupRead string
 }
 
 // Config carries the provider-level constants shared by all generated files and
@@ -241,6 +268,11 @@ type Config struct {
 	// ClientField is the field on *clients.Client that holds the bindings
 	// service (e.g. "EXO").
 	ClientField string
+	// TenantField is the string field on *clients.Client that holds the tenant
+	// id (e.g. "TenantID"). Group assignment resources key their per-policy-type
+	// lock on it, so provider aliases for different tenants do not wait on each
+	// other. Empty: one lock per policy type across all tenants.
+	TenantField string
 	// BindingsImport is the import path of the generated bindings (e.g.
 	// "github.com/terraprovider/go-exoscc/exo").
 	BindingsImport string

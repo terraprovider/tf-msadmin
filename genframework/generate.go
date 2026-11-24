@@ -66,6 +66,9 @@ func Generate(cfg Config, resources []Resource) ([]File, error) {
 
 // validate rejects attribute combinations the emitter cannot render correctly.
 func (r Resource) validate() error {
+	if r.AssignmentGroup && (!r.Assignment || r.AssignmentPolicyType == "" || r.Create.Method == "" || r.Create.Params == "") {
+		return fmt.Errorf("AssignmentGroup requires Assignment, AssignmentPolicyType and the grant op in Create")
+	}
 	for _, a := range r.Attributes {
 		// Object is the System.Object JSON round-trip (a string attribute written
 		// into an `any` field). A param whose declared type is bool/int/list must be
