@@ -306,6 +306,16 @@ type Config struct {
 	BindingsImport string
 	// BindingsPkg is that package's name (e.g. "exo").
 	BindingsPkg string
+	// WriteConflict names a provider helper func(error) bool that reports a
+	// write the service rejected only because a parallel write to the same
+	// tenant won, e.g. Teams answering concurrent New-/Set-Cs*Policy calls with
+	// HTTP 409 errorCode 40904/40902 (one etag-guarded document per policy type
+	// and tenant). When set, the main New, Set, Toggle and Remove calls retry it
+	// with exponential backoff and full jitter (resourcex.RetryConflict), on a
+	// budget separate from the not-found retry. It must not match an error that
+	// retrying cannot fix, such as Teams' 409 errorCode 40901 "already exists".
+	// Empty: no conflict retry, and the output is unchanged.
+	WriteConflict string
 
 	// The provider must supply these helpers (generation contract), typically in
 	// a hand-written helpers.go:
@@ -315,6 +325,7 @@ type Config struct {
 	//   getBool(map[string]any, string) bool
 	//   firstNonEmptyStr(...string) string
 	//   isNotFound(error) bool
+	//   <WriteConflict>(error) bool                      (when WriteConflict is set)
 	//   getInt(map[string]any, string) int64              (when any TypeInt attribute)
 	//   getStateBool(obj map[string]any, stateField, boolField string) bool
 	//     (when any StateField attribute: stateField == "Enabled" case-insensitively,

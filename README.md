@@ -38,6 +38,12 @@ retries a read until the resource is visible (rides out post-create lag) and,
 after an update, until it reflects the written values — returning the last-seen
 value rather than dropping the resource when it is present but not yet reflected.
 
+`RetryConflict` retries a write the service rejected only because a parallel
+write to the same tenant won (e.g. Teams' 409 "create conflict" on concurrent
+`New-Cs*Policy` calls), with exponential backoff and full jitter so the parallel
+writers spread out. Generated resources use it when genframework's
+`Config.WriteConflict` names the provider's predicate.
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Not affiliated with or endorsed by Microsoft.
