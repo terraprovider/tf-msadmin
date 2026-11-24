@@ -66,3 +66,18 @@ func TestRegistrationWithoutWriteOnlyHasNoHelper(t *testing.T) {
 		t.Errorf("registration file has the write-only helper without a write-only attribute:\n%s", reg)
 	}
 }
+
+// The schema makes every non-Required attribute Optional+Computed, so the null
+// fallback must not depend on Attribute.Computed; a Required one is always known.
+func TestWriteOnlyNullFallbackFollowsSchemaMode(t *testing.T) {
+	cfg, r := typedFixture()
+	r.Attributes = append(r.Attributes,
+		Attribute{TFName: "secret", Field: "Secret", APIName: "Secret", Type: TypeString, WriteOnly: true, InCreate: true, InUpdate: true},
+		Attribute{TFName: "required_secret", Field: "RequiredSecret", APIName: "RequiredSecret", Type: TypeString, Required: true, WriteOnly: true, InCreate: true, InUpdate: true},
+	)
+	src := genOne(t, cfg, r)
+	wantAll(t, src, "if read.Secret.IsUnknown() {\n\t\tread.Secret = types.StringNull()\n\t}")
+	if strings.Contains(src, "if read.RequiredSecret.IsUnknown()") {
+		t.Error("a Required write-only attribute got the unknown guard")
+	}
+}

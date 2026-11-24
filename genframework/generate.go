@@ -66,6 +66,9 @@ func Generate(cfg Config, resources []Resource) ([]File, error) {
 
 // validate rejects attribute combinations the emitter cannot render correctly.
 func (r Resource) validate() error {
+	if r.AssignmentGroup && (!r.Assignment || r.AssignmentPolicyType == "" || r.Create.Method == "" || r.Create.Params == "") {
+		return fmt.Errorf("AssignmentGroup requires Assignment, AssignmentPolicyType and the grant op in Create")
+	}
 	names := map[string]bool{}
 	for _, a := range r.Attributes {
 		names[a.TFName] = true
