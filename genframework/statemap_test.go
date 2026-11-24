@@ -96,6 +96,8 @@ func TestStateAttributeValidation(t *testing.T) {
 		"ChangeError without Replace":             {TFName: "x", Field: "X", Type: TypeBool, ChangeError: "no"},
 		"ChangeError on a string":                 {TFName: "x", Field: "X", Type: TypeString, Replace: true, ChangeError: "no"},
 		"ChangesWith on a non-computed bool":      {TFName: "x", Field: "X", Type: TypeBool, Required: true, ChangesWith: []string{"name"}},
+		"StateMap keys equal ignoring case":       {TFName: "x", Field: "X", Type: TypeString, StateField: "S", StateMap: map[string]string{"Shared": "a", "shared": "b"}},
+		"StateMap with an empty key":              {TFName: "x", Field: "X", Type: TypeString, StateField: "S", StateMap: map[string]string{"": "a"}},
 		"ChangesWith naming no attribute":         {TFName: "x", Field: "X", Type: TypeBool, Computed: true, ChangesWith: []string{"typo"}},
 		"ChangesWith naming itself":               {TFName: "x", Field: "X", Type: TypeBool, Computed: true, ChangesWith: []string{"x"}},
 	}

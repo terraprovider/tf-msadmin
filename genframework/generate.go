@@ -104,6 +104,16 @@ func (r Resource) validate() error {
 		case a.ChangeError != "" && (a.Type != TypeBool || !a.Replace):
 			return fmt.Errorf("attribute %s: ChangeError requires a TypeBool Replace attribute", a.TFName)
 		}
+		// stateString takes the first case-insensitive match while ranging over the
+		// map, so colliding keys would read nondeterministically; and an empty key
+		// would also match an absent property, which must read as "".
+		seen := map[string]bool{}
+		for k := range a.StateMap {
+			if k == "" || seen[strings.ToLower(k)] {
+				return fmt.Errorf("attribute %s: StateMap keys must be non-empty and differ case-insensitively (%q)", a.TFName, k)
+			}
+			seen[strings.ToLower(k)] = true
+		}
 		if t := a.Toggle; t != nil {
 			switch {
 			case a.Type != TypeBool:
