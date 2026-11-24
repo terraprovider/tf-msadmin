@@ -239,9 +239,9 @@ func TestMoveDownWithLag(t *testing.T) {
 }
 
 // Removing the lower-ranked assignment leaves the other at rank 1. Re-applying
-// its unchanged rank 2 reads the same as before the grant, which cannot be
-// told apart from a grant that never propagated, so it fails and asks for a
-// reachable rank.
+// its unchanged rank 2 is beyond the count, so Teams keeps it at rank 1: the
+// apply warns at once instead of polling for an unreachable rank, and the next
+// refresh shows the drift.
 func TestReapplyUnreachableRank(t *testing.T) {
 	h := newHarness(t, 0)
 	a, _ := h.create(g1, "Foo", 1)
@@ -251,8 +251,86 @@ func TestReapplyUnreachableRank(t *testing.T) {
 	}
 	b = h.read(b)
 	h.want(b, "Bar", 1)
-	if _, e := h.update(b, "Bar", 2); !strings.Contains(e, "cannot be reached") {
-		t.Fatalf("want an unreachable-rank error, got %q", e)
+	reads := h.svc.Reads
+	if _, e := h.update(b, "Bar", 2); e != "" || !h.warned("Rank placed last") {
+		t.Fatalf("want a rank warning and no error, got error %q, warnings %v", e, h.diags.Warnings())
+	}
+	if n, want := h.svc.Reads-reads, 1+resourcex.ReflectedReads; n != want {
+		t.Fatalf("update read %d times, want %d (no polling for an unreachable rank)", n, want)
+	}
+}
+
+// One plan adds g1 at rank 1 and moves g2, the only assignment, from 1 to 2.
+// They are independent, so Terraform may run either first; both orders must
+// apply, and the refresh afterwards must match the configuration.
+func TestInsertAndMoveEitherOrder(t *testing.T) {
+	for _, moveFirst := range []bool{true, false} {
+		name := "insert first"
+		if moveFirst {
+			name = "move first"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, 2)
+			b, e := h.create(g2, "Bar", 1)
+			if e != "" {
+				t.Fatal(e)
+			}
+			var a tfsdk.State
+			if moveFirst {
+				// Rank 2 is beyond the single assignment: placed last (still 1).
+				// It must confirm on the first consecutive reads instead of
+				// polling the whole budget, which holds the per-type lock and
+				// delays the insert.
+				reads := h.svc.Reads
+				if b, e = h.update(b, "Bar", 2); e != "" || !h.warned("Rank placed last") {
+					t.Fatalf("move: want a rank warning and no error, got error %q, warnings %v", e, h.diags.Warnings())
+				}
+				if n, want := h.svc.Reads-reads, 1+resourcex.ReflectedReads; n != want {
+					t.Fatalf("move read %d times, want %d (no polling while holding the lock)", n, want)
+				}
+				if a, e = h.create(g1, "Foo", 1); e != "" || h.warned("Rank placed last") {
+					t.Fatalf("insert: got error %q, warnings %v", e, h.diags.Warnings())
+				}
+			} else {
+				if a, e = h.create(g1, "Foo", 1); e != "" || h.warned("Rank placed last") {
+					t.Fatalf("insert: got error %q, warnings %v", e, h.diags.Warnings())
+				}
+				if b, e = h.update(b, "Bar", 2); e != "" || h.warned("Rank placed last") {
+					t.Fatalf("move: got error %q, warnings %v", e, h.diags.Warnings())
+				}
+			}
+			h.want(h.read(a), "Foo", 1)
+			h.want(h.read(b), "Bar", 2)
+		})
+	}
+}
+
+// A count that lags a recent write by one still confirms. Too low: the group's
+// own rank bounds it (it stays too low for the whole test). Too high, as after
+// a removal: the wait finds the pre-grant read, and the recount after the
+// budget accepts it (only the first count of each write is stale).
+func TestStaleCount(t *testing.T) {
+	for _, skew := range []int{-1, 1} {
+		h := newHarness(t, 2)
+		h.create(g1, "Foo", 1)
+		h.create(g2, "Bar", 2)
+		h.svc.CountSkew = skew
+		if skew > 0 {
+			h.svc.CountSkewCalls = 1
+		}
+		c, e := h.create(g3, "Baz", 3)
+		if e != "" {
+			t.Fatalf("skew %d: %s", skew, e)
+		}
+		h.want(h.read(c), "Baz", 3)
+		if skew > 0 {
+			h.svc.CountSkewCalls = 1
+		}
+		c, e = h.update(c, "Baz", 5)
+		if e != "" || !h.warned("Rank placed last") {
+			t.Fatalf("skew %d: want a rank warning and no error, got error %q, warnings %v", skew, e, h.diags.Warnings())
+		}
+		h.want(h.read(c), "Baz", 3)
 	}
 }
 

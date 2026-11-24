@@ -51,12 +51,25 @@ func TestGroupAssignmentGolden(t *testing.T) {
 		"cs.GrantCsTeamsMeetingPolicyParams{Group: group, PolicyName: want, Rank: &rank}",
 		"cs.GrantCsTeamsMeetingPolicyParams{Group: group}",
 		`r.client.CS.GroupPolicyAssignment(ctx, group, "TeamsMeetingPolicy")`,
+		`count, err := r.client.CS.GroupPolicyAssignmentCount(ctx, "TeamsMeetingPolicy")`,
 		"meetingPolicyGroupAssignmentResourceMu.LoadOrStore(r.client.TenantID, &sync.Mutex{})",
 	} {
 		if !strings.Contains(res, want) {
 			t.Errorf("generated source missing %q", want)
 		}
 	}
+	// AssignmentGroupCount overrides the count helper's name.
+	r.AssignmentGroupCount = "CountGroupAssignments"
+	custom, err := Generate(cfg, []Resource{r})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range custom {
+		if f.Name == "meeting_policy_group_assignment_resource.go" && strings.Count(string(f.Content), `r.client.CS.CountGroupAssignments(ctx, "TeamsMeetingPolicy")`) != 2 {
+			t.Error("AssignmentGroupCount must name the count helper (count and recount)")
+		}
+	}
+	r.AssignmentGroupCount = ""
 	// Without TenantField the lock is one per policy type across all tenants.
 	cfg.TenantField = ""
 	noTenant, err := Generate(cfg, []Resource{r})
