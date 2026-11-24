@@ -25,8 +25,11 @@ type Service struct {
 	visible []entry // what reads return while a write is still propagating
 	lagLeft int
 	Lag     int // reads that still see the previous state after a write
-	Reads   int
-	Grants  int
+	// StaleUpper returns names in upper case while a write is still propagating
+	// (a stale read that differs from the pre-grant read only in case).
+	StaleUpper bool
+	Reads      int
+	Grants     int
 }
 
 func (s *Service) GrantCsTeamsMeetingPolicy(_ context.Context, p GrantCsTeamsMeetingPolicyParams) (any, error) {
@@ -68,7 +71,8 @@ func (s *Service) GroupPolicyAssignment(_ context.Context, group, policyType str
 	defer s.mu.Unlock()
 	s.Reads++
 	view := s.order
-	if s.lagLeft > 0 {
+	stale := s.lagLeft > 0
+	if stale {
 		s.lagLeft--
 		view = s.visible
 	}
@@ -77,6 +81,9 @@ func (s *Service) GroupPolicyAssignment(_ context.Context, group, policyType str
 	}
 	for i, e := range view {
 		if strings.EqualFold(e.group, group) {
+			if stale && s.StaleUpper {
+				return strings.ToUpper(e.name), int64(i + 1), nil
+			}
 			return e.name, int64(i + 1), nil
 		}
 	}

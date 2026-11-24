@@ -74,8 +74,7 @@ func genGroupAssignmentResource(cfg Config, r Resource) ([]byte, error) {
 	fmt.Fprintf(&b, "// write sees a transient rank.\n")
 	fmt.Fprintf(&b, "var %s sync.Map\n\n", mu)
 	fmt.Fprintf(&b, "// %s is the poll budget for a write to become visible. Group grants showed\n", wait)
-	fmt.Fprintf(&b, "// up on the first read (2-5 s) in live tests; re-applying a rank that Teams\n")
-	fmt.Fprintf(&b, "// already placed last uses the whole budget. A variable so tests can shorten it.\n")
+	fmt.Fprintf(&b, "// up on the first read (2-5 s) in live tests; a variable so tests can shorten it.\n")
 	fmt.Fprintf(&b, "var %s = consistency.Config{Attempts: 20, Delay: 4 * time.Second}\n\n", wait)
 	fmt.Fprintf(&b, "var %s = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)\n\n", uuid)
 	fmt.Fprintf(&b, "type %s struct{ client *clients.Client }\n\n", recv)
@@ -108,7 +107,7 @@ func genGroupAssignmentResource(cfg Config, r Resource) ([]byte, error) {
 	fmt.Fprintf(&b, "\t\t\t%q: schema.StringAttribute{Required: true, Description: %q},\n",
 		"policy_name", "Name of the "+ptype+" instance to assign to the group.")
 	fmt.Fprintf(&b, "\t\t\t%q: schema.Int64Attribute{Required: true, Description: %q},\n",
-		"rank", "One-based rank among the group assignments of "+ptype+"; a user in several groups gets the policy of the lowest rank. Teams keeps ranks dense: assigning another group at an occupied rank shifts this one, which shows up as drift. A rank beyond the number of group assignments is placed last; the apply warns, and the difference shows up as drift until the lower ranks exist.")
+		"rank", "One-based rank among the group assignments of "+ptype+"; a user in several groups gets the policy of the lowest rank. Teams keeps ranks dense: assigning another group at an occupied rank shifts this one, which shows up as drift. A rank beyond the number of group assignments is placed last: the apply warns and the difference shows up as drift until the lower ranks exist, and re-applying a rank that stays beyond that number fails.")
 	fmt.Fprintf(&b, "\t\t},\n\t}\n}\n\n")
 
 	// Configure.
@@ -215,18 +214,20 @@ func genGroupAssignmentResource(cfg Config, r Resource) ([]byte, error) {
 	fmt.Fprintf(&b, "\t\tdiags.AddError(%q, err.Error())\n\t\treturn false, false\n\t}\n", grantCmdlet+" -Group failed")
 	fmt.Fprintf(&b, "\t// Teams honours a rank up to the number of group assignments of the type\n")
 	fmt.Fprintf(&b, "\t// and places a higher one last, so the requested name at a lower rank is\n")
-	fmt.Fprintf(&b, "\t// that outcome. It only ends the wait early when it differs from the\n")
-	fmt.Fprintf(&b, "\t// pre-grant read, which a stale read would repeat.\n")
-	fmt.Fprintf(&b, "\tplacedLast := func(s %s) bool { return strings.EqualFold(s.name, want) && s.rank < rank }\n", seen)
+	fmt.Fprintf(&b, "\t// that outcome, but only when it differs from the pre-grant read: a stale\n")
+	fmt.Fprintf(&b, "\t// read repeats that. Re-applying a rank that is already last therefore\n")
+	fmt.Fprintf(&b, "\t// never confirms and fails, which asks for a reachable rank.\n")
+	fmt.Fprintf(&b, "\tplacedLast := func(s %s) bool {\n", seen)
+	fmt.Fprintf(&b, "\t\treturn strings.EqualFold(s.name, want) && s.rank < rank && !(strings.EqualFold(s.name, before.name) && s.rank == before.rank)\n")
+	fmt.Fprintf(&b, "\t}\n")
 	fmt.Fprintf(&b, "\tgot, ok, err := r.waitFor(ctx, group, func(s %s) bool {\n", seen)
-	fmt.Fprintf(&b, "\t\treturn strings.EqualFold(s.name, want) && s.rank == rank || placedLast(s) && s != before\n")
+	fmt.Fprintf(&b, "\t\treturn strings.EqualFold(s.name, want) && s.rank == rank || placedLast(s)\n")
 	fmt.Fprintf(&b, "\t})\n")
 	fmt.Fprintf(&b, "\tif err != nil {\n\t\tdiags.AddError(%q, err.Error())\n\t\treturn true, false\n\t}\n", readErr)
-	fmt.Fprintf(&b, "\t// On an overrun, a read that still equals the pre-grant one at a lower rank\n")
-	fmt.Fprintf(&b, "\t// is a rank that was already placed last (re-applying an unreachable rank).\n")
-	fmt.Fprintf(&b, "\tif !ok && !placedLast(got) {\n")
+	fmt.Fprintf(&b, "\tif !ok {\n")
 	fmt.Fprintf(&b, "\t\tdiags.AddError(%q, fmt.Sprintf(%q, got.name, got.rank, want, rank))\n\t\treturn true, false\n\t}\n",
-		"group policy assignment did not reach the requested state", "After "+grantCmdlet+" -Group, Teams reports policy %q at rank %d; requested %q at rank %d.")
+		"group policy assignment did not reach the requested state",
+		"After "+grantCmdlet+" -Group, Teams reports policy %q at rank %d; requested %q at rank %d. Teams places a rank beyond the number of "+ptype+" group assignments last, so such a rank cannot be reached: lower it to at most that number.")
 	fmt.Fprintf(&b, "\tif got.rank != rank {\n")
 	fmt.Fprintf(&b, "\t\tdiags.AddAttributeWarning(path.Root(%q), %q, fmt.Sprintf(%q, got.rank, rank, rank))\n\t}\n", "rank", "Rank placed last",
 		"Teams reports the assignment at rank %d instead of %d. Teams places a rank beyond the number of "+ptype+" group assignments last. The next refresh shows the difference as drift, and an apply sets rank %d once the lower ranks exist.")

@@ -38,8 +38,7 @@ var (
 var meetingPolicyGroupAssignmentResourceMu sync.Map
 
 // meetingPolicyGroupAssignmentResourceWait is the poll budget for a write to become visible. Group grants showed
-// up on the first read (2-5 s) in live tests; re-applying a rank that Teams
-// already placed last uses the whole budget. A variable so tests can shorten it.
+// up on the first read (2-5 s) in live tests; a variable so tests can shorten it.
 var meetingPolicyGroupAssignmentResourceWait = consistency.Config{Attempts: 20, Delay: 4 * time.Second}
 
 var meetingPolicyGroupAssignmentResourceUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -75,7 +74,7 @@ func (r *meetingPolicyGroupAssignmentResource) Schema(_ context.Context, _ resou
 			"id":          schema.StringAttribute{Computed: true, Description: "Assignment identifier (the group's object id).", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
 			"group_id":    schema.StringAttribute{Required: true, Description: "Object id of the Entra group the policy is assigned to. Changing it forces replacement.", PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}},
 			"policy_name": schema.StringAttribute{Required: true, Description: "Name of the TeamsMeetingPolicy instance to assign to the group."},
-			"rank":        schema.Int64Attribute{Required: true, Description: "One-based rank among the group assignments of TeamsMeetingPolicy; a user in several groups gets the policy of the lowest rank. Teams keeps ranks dense: assigning another group at an occupied rank shifts this one, which shows up as drift. A rank beyond the number of group assignments is placed last; the apply warns, and the difference shows up as drift until the lower ranks exist."},
+			"rank":        schema.Int64Attribute{Required: true, Description: "One-based rank among the group assignments of TeamsMeetingPolicy; a user in several groups gets the policy of the lowest rank. Teams keeps ranks dense: assigning another group at an occupied rank shifts this one, which shows up as drift. A rank beyond the number of group assignments is placed last: the apply warns and the difference shows up as drift until the lower ranks exist, and re-applying a rank that stays beyond that number fails."},
 		},
 	}
 }
@@ -206,22 +205,21 @@ func (r *meetingPolicyGroupAssignmentResource) assign(ctx context.Context, plan 
 	}
 	// Teams honours a rank up to the number of group assignments of the type
 	// and places a higher one last, so the requested name at a lower rank is
-	// that outcome. It only ends the wait early when it differs from the
-	// pre-grant read, which a stale read would repeat.
+	// that outcome, but only when it differs from the pre-grant read: a stale
+	// read repeats that. Re-applying a rank that is already last therefore
+	// never confirms and fails, which asks for a reachable rank.
 	placedLast := func(s meetingPolicyGroupAssignmentResourceSeen) bool {
-		return strings.EqualFold(s.name, want) && s.rank < rank
+		return strings.EqualFold(s.name, want) && s.rank < rank && !(strings.EqualFold(s.name, before.name) && s.rank == before.rank)
 	}
 	got, ok, err := r.waitFor(ctx, group, func(s meetingPolicyGroupAssignmentResourceSeen) bool {
-		return strings.EqualFold(s.name, want) && s.rank == rank || placedLast(s) && s != before
+		return strings.EqualFold(s.name, want) && s.rank == rank || placedLast(s)
 	})
 	if err != nil {
 		diags.AddError("reading the group policy assignment failed", err.Error())
 		return true, false
 	}
-	// On an overrun, a read that still equals the pre-grant one at a lower rank
-	// is a rank that was already placed last (re-applying an unreachable rank).
-	if !ok && !placedLast(got) {
-		diags.AddError("group policy assignment did not reach the requested state", fmt.Sprintf("After Grant-CsTeamsMeetingPolicy -Group, Teams reports policy %q at rank %d; requested %q at rank %d.", got.name, got.rank, want, rank))
+	if !ok {
+		diags.AddError("group policy assignment did not reach the requested state", fmt.Sprintf("After Grant-CsTeamsMeetingPolicy -Group, Teams reports policy %q at rank %d; requested %q at rank %d. Teams places a rank beyond the number of TeamsMeetingPolicy group assignments last, so such a rank cannot be reached: lower it to at most that number.", got.name, got.rank, want, rank))
 		return true, false
 	}
 	if got.rank != rank {

@@ -239,8 +239,9 @@ func TestMoveDownWithLag(t *testing.T) {
 }
 
 // Removing the lower-ranked assignment leaves the other at rank 1. Re-applying
-// its unchanged rank 2 reads the same as before the grant, so it uses the
-// whole budget, then warns instead of failing.
+// its unchanged rank 2 reads the same as before the grant, which cannot be
+// told apart from a grant that never propagated, so it fails and asks for a
+// reachable rank.
 func TestReapplyUnreachableRank(t *testing.T) {
 	h := newHarness(t, 0)
 	a, _ := h.create(g1, "Foo", 1)
@@ -250,9 +251,49 @@ func TestReapplyUnreachableRank(t *testing.T) {
 	}
 	b = h.read(b)
 	h.want(b, "Bar", 1)
-	if _, e := h.update(b, "Bar", 2); e != "" || !h.warned("Rank placed last") {
-		t.Fatalf("want a rank warning and no error, got error %q, warnings %v", e, h.diags.Warnings())
+	if _, e := h.update(b, "Bar", 2); !strings.Contains(e, "cannot be reached") {
+		t.Fatalf("want an unreachable-rank error, got %q", e)
 	}
+}
+
+// A placed-last read must also hold on consecutive reads: one at the very end
+// of the budget is not enough.
+func TestPlacedLastNeedsConsecutiveReads(t *testing.T) {
+	h := newHarness(t, 0)
+	h.create(g1, "Foo", 1)
+	h.svc.Lag = meetingPolicyGroupAssignmentResourceWait.Attempts - 1
+	if _, e := h.create(g2, "Bar", 5); !strings.Contains(e, "did not reach the requested state") {
+		t.Fatalf("want a did-not-reach error, got %q", e)
+	}
+}
+
+// An in-range move whose grant never shows up fails; the unchanged lower rank
+// is not taken for "placed last".
+func TestMoveDownNeverVisible(t *testing.T) {
+	h := newHarness(t, 0)
+	a, _ := h.create(g1, "Foo", 1)
+	h.create(g2, "Bar", 2)
+	h.create(g3, "Baz", 3)
+	h.svc.Lag = 1000
+	if _, e := h.update(a, "Foo", 3); !strings.Contains(e, "did not reach the requested state") || h.warned("Rank placed last") {
+		t.Fatalf("want a did-not-reach error and no warning, got %q, warnings %v", e, h.diags.Warnings())
+	}
+}
+
+// A stale read that differs from the pre-grant read only in the name's case
+// is still stale, not "placed last".
+func TestStaleReadCaseOnly(t *testing.T) {
+	h := newHarness(t, 0)
+	a, _ := h.create(g1, "Foo", 1)
+	h.create(g2, "Bar", 2)
+	h.create(g3, "Baz", 3)
+	h.svc.StaleUpper = true
+	h.svc.Lag = 2
+	a, e := h.update(a, "Foo", 3)
+	if e != "" || h.warned("Rank placed last") {
+		t.Fatalf("want no error and no warning, got error %q, warnings %v", e, h.diags.Warnings())
+	}
+	h.want(h.read(a), "Foo", 3)
 }
 
 // A grant that never shows up fails the create, but the state is saved so
