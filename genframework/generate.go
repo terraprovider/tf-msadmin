@@ -103,6 +103,10 @@ func (r Resource) validate() error {
 			return fmt.Errorf("attribute %s: ChangesWith requires a Computed TypeBool", a.TFName)
 		case a.ChangeError != "" && (a.Type != TypeBool || !a.Replace):
 			return fmt.Errorf("attribute %s: ChangeError requires a TypeBool Replace attribute", a.TFName)
+		case a.ChangeError != "" && a.WriteOnly:
+			// failOnChangeBool compares with the state value; a write-only one stays
+			// null on an existing object, so a change could never be detected.
+			return fmt.Errorf("attribute %s: ChangeError cannot be combined with WriteOnly", a.TFName)
 		}
 		// stateString takes the first case-insensitive match while ranging over the
 		// map, so colliding keys would read nondeterministically; and an empty key

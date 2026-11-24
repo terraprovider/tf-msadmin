@@ -107,7 +107,8 @@ type Attribute struct {
 	// object fail the plan with this message instead of replacing it, for
 	// attributes whose replacement destroys data (e.g. a mailbox type switch).
 	// Leaving the attribute unconfigured never fails. Destroying and re-creating
-	// the object stays possible as a separate step. TypeBool only.
+	// the object stays possible as a separate step. TypeBool only, and not
+	// WriteOnly: the guard compares with the read-back state value.
 	ChangeError string
 	// Toggle manages a bool attribute through companion Enable-/Disable- cmdlets
 	// (e.g. Enable-SafeLinksRule / Disable-SafeLinksRule -Identity) because
