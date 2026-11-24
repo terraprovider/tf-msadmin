@@ -69,7 +69,20 @@ func (r Resource) validate() error {
 	if r.AssignmentGroup && (!r.Assignment || r.AssignmentPolicyType == "" || r.Create.Method == "" || r.Create.Params == "") {
 		return fmt.Errorf("AssignmentGroup requires Assignment, AssignmentPolicyType and the grant op in Create")
 	}
+	names := map[string]bool{}
 	for _, a := range r.Attributes {
+		names[a.TFName] = true
+	}
+	if r.Members != nil {
+		names[r.Members.TFName] = true
+	}
+	for _, a := range r.Attributes {
+		for _, n := range a.ChangesWith {
+			if n == a.TFName || !names[n] {
+				// A missing name would fail every plan at runtime (path not found).
+				return fmt.Errorf("attribute %s: ChangesWith %q is not another attribute of %s", a.TFName, n, r.TFName)
+			}
+		}
 		// Object is the System.Object JSON round-trip (a string attribute written
 		// into an `any` field). A param whose declared type is bool/int/list must be
 		// modelled as that type with Object=false, so it takes the typed write path.
@@ -79,8 +92,31 @@ func (r Resource) validate() error {
 		if a.Delta && a.Type != TypeStringSet {
 			return fmt.Errorf("attribute %s: Delta requires TypeStringSet", a.TFName)
 		}
-		if a.StateField != "" && a.Type != TypeBool {
-			return fmt.Errorf("attribute %s: StateField requires TypeBool", a.TFName)
+		switch {
+		case a.StateField != "" && a.Type != TypeBool && !(a.Type == TypeString && len(a.StateMap) > 0):
+			return fmt.Errorf("attribute %s: StateField requires TypeBool, or TypeString with StateMap", a.TFName)
+		case a.StateValue != "" && (a.Type != TypeBool || a.StateField == ""):
+			return fmt.Errorf("attribute %s: StateValue requires a TypeBool StateField", a.TFName)
+		case len(a.StateMap) > 0 && (a.Type != TypeString || a.StateField == ""):
+			return fmt.Errorf("attribute %s: StateMap requires a TypeString StateField", a.TFName)
+		case len(a.ChangesWith) > 0 && (a.Type != TypeBool || !a.Computed):
+			return fmt.Errorf("attribute %s: ChangesWith requires a Computed TypeBool", a.TFName)
+		case a.ChangeError != "" && (a.Type != TypeBool || !a.Replace):
+			return fmt.Errorf("attribute %s: ChangeError requires a TypeBool Replace attribute", a.TFName)
+		case a.ChangeError != "" && a.WriteOnly:
+			// failOnChangeBool compares with the state value; a write-only one stays
+			// null on an existing object, so a change could never be detected.
+			return fmt.Errorf("attribute %s: ChangeError cannot be combined with WriteOnly", a.TFName)
+		}
+		// stateString takes the first case-insensitive match while ranging over the
+		// map, so colliding keys would read nondeterministically; and an empty key
+		// would also match an absent property, which must read as "".
+		seen := map[string]bool{}
+		for k := range a.StateMap {
+			if k == "" || seen[strings.ToLower(k)] {
+				return fmt.Errorf("attribute %s: StateMap keys must be non-empty and differ case-insensitively (%q)", a.TFName, k)
+			}
+			seen[strings.ToLower(k)] = true
 		}
 		if t := a.Toggle; t != nil {
 			switch {
@@ -423,6 +459,10 @@ func (a Attribute) planModifiers() string {
 	var mods []string
 	pkg := strings.ToLower(a.tfType()) + "planmodifier" // string/bool/set planmodifier
 	switch {
+	case a.ChangeError != "":
+		mods = append(mods, fmt.Sprintf("%s.RequiresReplaceIf(failOnChangeBool(%q), %q, %q)", pkg, a.ChangeError,
+			"Changing it on an existing object fails the plan instead of replacing the object.",
+			"Changing it on an existing object fails the plan instead of replacing the object."))
 	case a.replaceIfRecorded():
 		// See replaceIfWriteOnlyRecorded in the registration file.
 		mods = append(mods, pkg+".RequiresReplaceIf(replaceIfWriteOnlyRecorded, "+
@@ -436,6 +476,14 @@ func (a Attribute) planModifiers() string {
 	// RequiresReplace ones, does not spuriously force replacement).
 	if a.Computed {
 		mods = append(mods, pkg+".UseStateForUnknown()")
+	}
+	// After UseStateForUnknown, so a linked change overrides the kept state value.
+	if len(a.ChangesWith) > 0 {
+		names := make([]string, len(a.ChangesWith))
+		for i, n := range a.ChangesWith {
+			names[i] = fmt.Sprintf("%q", n)
+		}
+		mods = append(mods, "unknownIfChangedBool("+strings.Join(names, ", ")+")")
 	}
 	return strings.Join(mods, ", ")
 }
@@ -532,8 +580,55 @@ func (a Attribute) writeStmt(pv string, site writeSite) string {
 	}
 }
 
+// customStateValue reports whether a StateField bool matches a value other than
+// "Enabled", which getStateBool (the provider helper) cannot express.
+func (a Attribute) customStateValue() bool {
+	return a.StateField != "" && a.StateValue != "" && !strings.EqualFold(a.StateValue, "Enabled")
+}
+
+// stateBoolRead renders the read of a StateField bool from obj.
+func (a Attribute) stateBoolRead() string {
+	if a.customStateValue() {
+		return fmt.Sprintf("stateBoolIs(obj, %q, %q, %q)", a.StateField, a.StateValue, a.APIName)
+	}
+	return fmt.Sprintf("getStateBool(obj, %q, %q)", a.StateField, a.APIName)
+}
+
+// stateMapArgs renders the obj, StateField and StateMap arguments of the
+// stateString helpers, with the map keys sorted for stable output.
+func (a Attribute) stateMapArgs() string {
+	keys := make([]string, 0, len(a.StateMap))
+	for k := range a.StateMap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	fmt.Fprintf(&b, "obj, %q, map[string]string{", a.StateField)
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%q: %q", k, a.StateMap[k])
+	}
+	b.WriteString("}")
+	return b.String()
+}
+
+// stateStringRead renders the read of a StateMap string from obj.
+func (a Attribute) stateStringRead() string { return "stateString(" + a.stateMapArgs() + ")" }
+
+// stateStringReflects renders whether obj's mapped StateField equals the Go
+// expression want (case-insensitive); an object without the property counts as
+// reflected, so the wait cannot stall on it.
+func (a Attribute) stateStringReflects(want string) string {
+	return "stateStringReflects(" + a.stateMapArgs() + ", " + want + ")"
+}
+
 // readAssign renders the readInto assignment.
 func (a Attribute) readAssign() string {
+	if len(a.StateMap) > 0 {
+		return fmt.Sprintf("m.%s = types.StringValue(%s)", a.Field, a.stateStringRead())
+	}
 	if a.Object {
 		// System.Object read-back is a structured value (array/object); serialize it
 		// to a JSON string so it round-trips against a jsonencode() config.
@@ -542,7 +637,7 @@ func (a Attribute) readAssign() string {
 	switch a.Type {
 	case TypeBool:
 		if a.StateField != "" {
-			return fmt.Sprintf("m.%s = types.BoolValue(getStateBool(obj, %q, %q))", a.Field, a.StateField, a.APIName)
+			return fmt.Sprintf("m.%s = types.BoolValue(%s)", a.Field, a.stateBoolRead())
 		}
 		return fmt.Sprintf("m.%s = types.BoolValue(getBool(obj, %q))", a.Field, a.APIName)
 	case TypeStringSet:
