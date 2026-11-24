@@ -1,10 +1,13 @@
 package resourcex
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/hashicorp/terraform-plugin-log/tflogtest"
 )
 
 // apiErr stands in for the provider's API error: a 409 is a create conflict
@@ -136,5 +139,34 @@ func TestRetryConflictCallExistingObjectFatal(t *testing.T) {
 	call := func(context.Context, string) (string, error) { n++; return "", errExists }
 	if _, err := RetryConflictCall(context.Background(), fastCfg, call, "x", isNF, isConflict); !errors.Is(err, errExists) || n != 1 {
 		t.Fatalf("err=%v n=%d (want fatal after 1 call)", err, n)
+	}
+}
+
+// Each retry logs one debug line with the attempt, the budget, the wait and
+// the error; the final success and a non-conflict error log nothing.
+func TestRetryConflictLogsEachRetry(t *testing.T) {
+	old := jitter
+	jitter = func(time.Duration) time.Duration { return time.Millisecond }
+	t.Cleanup(func() { jitter = old })
+	var out bytes.Buffer
+	ctx := tflogtest.RootLogger(context.Background(), &out)
+	do, n := failing(errConflict, errConflict, errExists)
+	if err := RetryConflict(ctx, ConflictConfig{}, do, isConflict); !errors.Is(err, errExists) || *n != 3 {
+		t.Fatalf("err=%v n=%d", err, *n)
+	}
+	lines, err := tflogtest.MultilineJSONDecode(&out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("got %d log lines, want 2 (one per retry): %v", len(lines), lines)
+	}
+	for i, l := range lines {
+		if l["@level"] != "debug" || l["@message"] != "write conflict, retrying" {
+			t.Errorf("line %d: %v", i, l)
+		}
+		if l["attempt"] != float64(i+1) || l["max_attempts"] != float64(DefaultConflictAttempts) || l["wait"] != "1ms" || l["error"] != "CreateConflict" {
+			t.Errorf("line %d fields: %v", i, l)
+		}
 	}
 }

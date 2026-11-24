@@ -5,6 +5,7 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-log/tflog"
 	"github.com/terraprovider/go-msadmin/consistency"
 )
 
@@ -59,6 +60,8 @@ var jitter = func(d time.Duration) time.Duration { return rand.N(d + 1) }
 //
 // Any other error is returned at once, and so is the last conflict when the
 // budget is exhausted. A cancelled context aborts the wait with ctx.Err().
+// Each retry logs one debug line (attempt, budget, wait, error), visible with
+// TF_LOG=DEBUG.
 // conflict must match only the transient case: a 409 for an object that
 // already exists has to stay fatal.
 func RetryConflict(ctx context.Context, cfg ConflictConfig, do func(context.Context) error, conflict func(error) bool) error {
@@ -68,7 +71,14 @@ func RetryConflict(ctx context.Context, cfg ConflictConfig, do func(context.Cont
 		if err == nil || !conflict(err) || attempt >= cfg.Attempts {
 			return err
 		}
-		t := time.NewTimer(jitter(cfg.ceiling(attempt)))
+		wait := jitter(cfg.ceiling(attempt))
+		tflog.Debug(ctx, "write conflict, retrying", map[string]any{
+			"attempt":      attempt,
+			"max_attempts": cfg.Attempts,
+			"wait":         wait.String(),
+			"error":        err.Error(),
+		})
+		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			t.Stop()
