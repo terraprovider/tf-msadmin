@@ -305,6 +305,47 @@ func TestInsertAndMoveEitherOrder(t *testing.T) {
 	}
 }
 
+// A count one too low makes the clamped rank equal the group's current rank,
+// so stale pre-grant reads look like the outcome. The recount expects the
+// requested rank, and the move is confirmed on consecutive reads.
+func TestUndercountMove(t *testing.T) {
+	h := newHarness(t, 0)
+	h.create(g1, "Foo", 1)
+	b, _ := h.create(g2, "Bar", 2)
+	h.create(g3, "Baz", 3)
+	h.svc.Lag, h.svc.CountSkew, h.svc.CountSkewCalls = 3, -1, 1
+	b, e := h.update(b, "Bar", 3)
+	if e != "" || h.warned("Rank placed last") {
+		t.Fatalf("want no error and no warning, got error %q, warnings %v", e, h.diags.Warnings())
+	}
+	h.want(h.read(b), "Bar", 3)
+}
+
+// The same undercount with a move that never becomes visible must fail, not
+// confirm the stale pre-grant reads.
+func TestUndercountMoveNeverVisible(t *testing.T) {
+	h := newHarness(t, 0)
+	h.create(g1, "Foo", 1)
+	b, _ := h.create(g2, "Bar", 2)
+	h.create(g3, "Baz", 3)
+	h.svc.Lag, h.svc.CountSkew, h.svc.CountSkewCalls = 1000, -1, 1
+	if _, e := h.update(b, "Bar", 3); !strings.Contains(e, "not confirmed on consecutive reads") {
+		t.Fatalf("want an unconfirmed error, got %q", e)
+	}
+}
+
+// Renaming the only assignment at an out-of-range rank: the new name shows up
+// on the last poll only. One read is not a confirmation, also not after the
+// recount (which expects the same rank).
+func TestRenameOutOfRangeSingleRead(t *testing.T) {
+	h := newHarness(t, 0)
+	a, _ := h.create(g1, "Foo", 1)
+	h.svc.Lag = 9 // reads 1-9 after the grant are stale, read 10 (the last) is not
+	if _, e := h.update(a, "Bar", 5); !strings.Contains(e, "not confirmed on consecutive reads") {
+		t.Fatalf("want an unconfirmed error, got %q", e)
+	}
+}
+
 // A count that lags a recent write by one still confirms. Too low: the group's
 // own rank bounds it (it stays too low for the whole test). Too high, as after
 // a removal: the wait finds the pre-grant read, and the recount after the

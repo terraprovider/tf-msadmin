@@ -226,18 +226,34 @@ func (r *meetingPolicyGroupAssignmentResource) assign(ctx context.Context, plan 
 	placedLast := func(s meetingPolicyGroupAssignmentResourceSeen) bool {
 		return strings.EqualFold(s.name, want) && s.rank < rank && !(strings.EqualFold(s.name, before.name) && s.rank == before.rank)
 	}
-	got, ok, err := r.waitFor(ctx, group, func(s meetingPolicyGroupAssignmentResourceSeen) bool {
+	done := func(s meetingPolicyGroupAssignmentResourceSeen) bool {
 		return strings.EqualFold(s.name, want) && (s.rank == rank || s.rank == expected) || placedLast(s)
-	})
+	}
+	got, ok, err := r.waitFor(ctx, group, done)
 	if err != nil {
 		diags.AddError("reading the group policy assignment failed", err.Error())
 		return true, false
 	}
-	if !ok && strings.EqualFold(got.name, want) && got.rank < rank {
-		// A count that lagged a removal expects too high a rank, and the result
-		// can equal the pre-grant read, which placedLast rejects: count again.
-		if n, err := r.client.CS.GroupPolicyAssignmentCount(ctx, "TeamsMeetingPolicy"); err == nil && got.rank == clamp(n) {
-			ok = true
+	// A clamped result equal to the pre-grant read, and a clamped wait that never
+	// confirmed, both rest on the count: one that lagged an insert takes a stale
+	// pre-grant read for the outcome, one that lagged a removal rejects the real
+	// outcome. Count again, and if that expects another rank, wait for it on
+	// consecutive reads. Only for a group that had an assignment: for a new one
+	// every clamped outcome differs from the pre-grant read, which placedLast
+	// accepts, and a count after the grant would include the group itself.
+	unchanged := strings.EqualFold(got.name, before.name) && got.rank == before.rank
+	if before.name != "" && strings.EqualFold(got.name, want) && got.rank < rank && (unchanged || !ok) {
+		n, err := r.client.CS.GroupPolicyAssignmentCount(ctx, "TeamsMeetingPolicy")
+		if err != nil {
+			diags.AddError("counting the group policy assignments failed", err.Error())
+			return true, false
+		}
+		if e := clamp(n); e != expected {
+			count, expected = n, e
+			if got, ok, err = r.waitFor(ctx, group, done); err != nil {
+				diags.AddError("reading the group policy assignment failed", err.Error())
+				return true, false
+			}
 		}
 	}
 	if !ok {
