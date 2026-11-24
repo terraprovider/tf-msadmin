@@ -45,8 +45,10 @@ type Attribute struct {
 	// WriteOnly marks an attribute the API accepts on write but never returns on
 	// read (e.g. a site script's Content). The generated readInto skips it, so a
 	// refresh never clobbers the configured/state value; create/update still send
-	// it and reconcile keeps the configured value authoritative. Requires the
-	// attribute be Required or Optional+Computed with a known value.
+	// it and reconcile keeps the configured value authoritative. An unconfigured
+	// Optional+Computed one is stored as null after apply. With Replace on a
+	// TypeString, an empty state value (e.g. after import) does not force
+	// replacement: setting the value then only records it.
 	WriteOnly bool
 	// PointerParam is true when the binding's params field is a pointer
 	// (*bool / *string) rather than a value — the case for tri-state

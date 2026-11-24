@@ -407,10 +407,25 @@ func (a Attribute) modeFields() string {
 	return "Optional: true, Computed: true, "
 }
 
+// replaceIfRecorded reports whether a create-time write-only string replaces
+// only when state records a value: nothing reads it back, so an empty state
+// value (an imported object, or state from before the attribute was
+// write-only) says nothing about what the object was created with. Setting it
+// then only records the value; replacing would recreate the object.
+func (a Attribute) replaceIfRecorded() bool {
+	return a.Replace && a.WriteOnly && a.Type == TypeString
+}
+
 func (a Attribute) planModifiers() string {
 	var mods []string
 	pkg := strings.ToLower(a.tfType()) + "planmodifier" // string/bool/set planmodifier
-	if a.Replace {
+	switch {
+	case a.replaceIfRecorded():
+		// See replaceIfWriteOnlyRecorded in the registration file.
+		mods = append(mods, pkg+".RequiresReplaceIf(replaceIfWriteOnlyRecorded, "+
+			"\"Changing it forces replacement, unless state records no value (e.g. after import).\", "+
+			"\"Changing it forces replacement, unless state records no value (e.g. after import).\")")
+	case a.Replace:
 		mods = append(mods, pkg+".RequiresReplace()")
 	}
 	// Computed attributes keep their prior value when the plan leaves them
