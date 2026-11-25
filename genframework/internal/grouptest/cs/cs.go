@@ -37,9 +37,14 @@ type Service struct {
 	// AfterGrant is returned by the reads right after the next grant, one
 	// entry per read, before the normal view (intermediate replica states).
 	AfterGrant []Read
-	script     []Read
-	Reads      int
-	Grants     int
+	// CountSkew is added to the next CountSkewCalls counts, as a list that lags
+	// a recent write (CountSkewCalls 0: every count).
+	CountSkew      int
+	CountSkewCalls int
+	script         []Read
+	Reads          int
+	Grants         int
+	Counts         int
 }
 
 func (s *Service) GrantCsTeamsMeetingPolicy(_ context.Context, p GrantCsTeamsMeetingPolicyParams) (any, error) {
@@ -104,4 +109,25 @@ func (s *Service) GroupPolicyAssignment(_ context.Context, group, policyType str
 		}
 	}
 	return "", 0, nil
+}
+
+// GroupPolicyAssignmentCount returns the number of group assignments of the
+// type, plus CountSkew.
+func (s *Service) GroupPolicyAssignmentCount(_ context.Context, policyType string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Counts++
+	if policyType != "TeamsMeetingPolicy" {
+		return 0, nil
+	}
+	n := len(s.order)
+	if s.CountSkewCalls >= 0 {
+		n += s.CountSkew
+		if s.CountSkewCalls > 0 {
+			if s.CountSkewCalls--; s.CountSkewCalls == 0 {
+				s.CountSkewCalls = -1 // used up
+			}
+		}
+	}
+	return int64(n), nil
 }

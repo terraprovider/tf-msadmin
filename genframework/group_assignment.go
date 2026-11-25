@@ -14,6 +14,15 @@ func (r Resource) assignmentGroupRead() string {
 	return "GroupPolicyAssignment"
 }
 
+// assignmentGroupCount is the bindings-service method that counts the group
+// assignments of the policy type (default "GroupPolicyAssignmentCount").
+func (r Resource) assignmentGroupCount() string {
+	if r.AssignmentGroupCount != "" {
+		return r.AssignmentGroupCount
+	}
+	return "GroupPolicyAssignmentCount"
+}
+
 // grantGroupField is the grant op's params field that carries the target group
 // (default "Group").
 func (r Resource) grantGroupField() string {
@@ -39,6 +48,7 @@ func genGroupAssignmentResource(cfg Config, r Resource) ([]byte, error) {
 	groupField := r.grantGroupField() // grant params field for the group, e.g. "Group"
 	ptype := r.AssignmentPolicyType
 	readFn := r.assignmentGroupRead()
+	countFn := r.assignmentGroupCount()
 	grantCmdlet := r.grantCmdlet()
 	mu, wait, uuid, seen := recv+"Mu", recv+"Wait", recv+"UUID", recv+"Seen"
 	const readErr = "reading the group policy assignment failed"
@@ -107,7 +117,7 @@ func genGroupAssignmentResource(cfg Config, r Resource) ([]byte, error) {
 	fmt.Fprintf(&b, "\t\t\t%q: schema.StringAttribute{Required: true, Description: %q},\n",
 		"policy_name", "Name of the "+ptype+" instance to assign to the group.")
 	fmt.Fprintf(&b, "\t\t\t%q: schema.Int64Attribute{Required: true, Description: %q},\n",
-		"rank", "One-based rank among the group assignments of "+ptype+"; a user in several groups gets the policy of the lowest rank. Teams keeps ranks dense: assigning another group at an occupied rank shifts this one, which shows up as drift. A rank beyond the number of group assignments is placed last: the apply warns and the difference shows up as drift until the lower ranks exist, and re-applying a rank that stays beyond that number fails.")
+		"rank", "One-based rank among the group assignments of "+ptype+"; a user in several groups gets the policy of the lowest rank. Teams keeps ranks dense: assigning another group at an occupied rank shifts this one, which shows up as drift. A rank beyond the number of group assignments is placed last: the apply warns and the difference shows up as drift until the lower ranks exist, and an apply warns again while the rank stays beyond that number.")
 	fmt.Fprintf(&b, "\t\t},\n\t}\n}\n\n")
 
 	// Configure.
@@ -200,6 +210,10 @@ func genGroupAssignmentResource(cfg Config, r Resource) ([]byte, error) {
 	// of group assignments of the type last (live-verified); that is a warning,
 	// not an error, so a configuration whose lower ranks are created later in
 	// the same apply (Terraform picks the order) converges on the next run.
+	// The rank Teams will use is computed from the count read before the grant:
+	// the group's own read cannot tell a placed-last result that equals the
+	// pre-grant state (a move beyond the count) from a grant that has not
+	// propagated yet.
 	fmt.Fprintf(&b, "// assign grants the planned policy at the planned rank and waits until the read\n")
 	fmt.Fprintf(&b, "// reports both. granted: the grant call succeeded; ok: the result was confirmed.\n")
 	fmt.Fprintf(&b, "func (r *%s) assign(ctx context.Context, plan *%s, diags *diag.Diagnostics) (granted, ok bool) {\n", recv, model)
@@ -210,24 +224,49 @@ func genGroupAssignmentResource(cfg Config, r Resource) ([]byte, error) {
 	fmt.Fprintf(&b, "\tplan.ID = types.StringValue(group)\n")
 	fmt.Fprintf(&b, "\tbefore, err := r.read(ctx, group)\n")
 	fmt.Fprintf(&b, "\tif err != nil {\n\t\tdiags.AddError(%q, err.Error())\n\t\treturn false, false\n\t}\n", readErr)
+	fmt.Fprintf(&b, "\tcount, err := %s.%s(ctx, %q)\n", svc, countFn, ptype)
+	fmt.Fprintf(&b, "\tif err != nil {\n\t\tdiags.AddError(%q, err.Error())\n\t\treturn false, false\n\t}\n", "counting the group policy assignments failed")
+	fmt.Fprintf(&b, "\t// clamp is the rank Teams uses: it honours a rank up to the number of group\n")
+	fmt.Fprintf(&b, "\t// assignments of the type, one more for a group that has none yet, and\n")
+	fmt.Fprintf(&b, "\t// places a higher one last. The group's own rank bounds a count that lags\n")
+	fmt.Fprintf(&b, "\t// a recent insert.\n")
+	fmt.Fprintf(&b, "\tclamp := func(count int64) int64 {\n")
+	fmt.Fprintf(&b, "\t\tslots := max(count, before.rank)\n")
+	fmt.Fprintf(&b, "\t\tif before.name == \"\" {\n\t\t\tslots = count + 1\n\t\t}\n")
+	fmt.Fprintf(&b, "\t\treturn min(rank, slots)\n\t}\n")
+	fmt.Fprintf(&b, "\texpected := clamp(count)\n")
 	fmt.Fprintf(&b, "\tif _, err := %s.%s(ctx, %s.%s{%s: group, PolicyName: want, Rank: &rank}); err != nil {\n", svc, grant, pkg, grantP, groupField)
 	fmt.Fprintf(&b, "\t\tdiags.AddError(%q, err.Error())\n\t\treturn false, false\n\t}\n", grantCmdlet+" -Group failed")
-	fmt.Fprintf(&b, "\t// Teams honours a rank up to the number of group assignments of the type\n")
-	fmt.Fprintf(&b, "\t// and places a higher one last, so the requested name at a lower rank is\n")
-	fmt.Fprintf(&b, "\t// that outcome, but only when it differs from the pre-grant read: a stale\n")
-	fmt.Fprintf(&b, "\t// read repeats that. Re-applying a rank that is already last therefore\n")
-	fmt.Fprintf(&b, "\t// never confirms and fails, which asks for a reachable rank.\n")
+	fmt.Fprintf(&b, "\t// The wait accepts the requested rank and the expected one. If the count\n")
+	fmt.Fprintf(&b, "\t// was stale, another lower rank is accepted as placed last, but only when\n")
+	fmt.Fprintf(&b, "\t// it differs from the pre-grant read, because a stale read repeats that.\n")
 	fmt.Fprintf(&b, "\tplacedLast := func(s %s) bool {\n", seen)
 	fmt.Fprintf(&b, "\t\treturn strings.EqualFold(s.name, want) && s.rank < rank && !(strings.EqualFold(s.name, before.name) && s.rank == before.rank)\n")
 	fmt.Fprintf(&b, "\t}\n")
-	fmt.Fprintf(&b, "\tgot, ok, err := r.waitFor(ctx, group, func(s %s) bool {\n", seen)
-	fmt.Fprintf(&b, "\t\treturn strings.EqualFold(s.name, want) && s.rank == rank || placedLast(s)\n")
-	fmt.Fprintf(&b, "\t})\n")
+	fmt.Fprintf(&b, "\tdone := func(s %s) bool {\n", seen)
+	fmt.Fprintf(&b, "\t\treturn strings.EqualFold(s.name, want) && (s.rank == rank || s.rank == expected) || placedLast(s)\n")
+	fmt.Fprintf(&b, "\t}\n")
+	fmt.Fprintf(&b, "\tgot, ok, err := r.waitFor(ctx, group, done)\n")
 	fmt.Fprintf(&b, "\tif err != nil {\n\t\tdiags.AddError(%q, err.Error())\n\t\treturn true, false\n\t}\n", readErr)
+	fmt.Fprintf(&b, "\t// A clamped result equal to the pre-grant read, and a clamped wait that never\n")
+	fmt.Fprintf(&b, "\t// confirmed, both rest on the count: one that lagged an insert takes a stale\n")
+	fmt.Fprintf(&b, "\t// pre-grant read for the outcome, one that lagged a removal rejects the real\n")
+	fmt.Fprintf(&b, "\t// outcome. Count again, and if that expects another rank, wait for it on\n")
+	fmt.Fprintf(&b, "\t// consecutive reads. Only for a group that had an assignment: for a new one\n")
+	fmt.Fprintf(&b, "\t// every clamped outcome differs from the pre-grant read, which placedLast\n")
+	fmt.Fprintf(&b, "\t// accepts, and a count after the grant would include the group itself.\n")
+	fmt.Fprintf(&b, "\tunchanged := strings.EqualFold(got.name, before.name) && got.rank == before.rank\n")
+	fmt.Fprintf(&b, "\tif before.name != \"\" && strings.EqualFold(got.name, want) && got.rank < rank && (unchanged || !ok) {\n")
+	fmt.Fprintf(&b, "\t\tn, err := %s.%s(ctx, %q)\n", svc, countFn, ptype)
+	fmt.Fprintf(&b, "\t\tif err != nil {\n\t\t\tdiags.AddError(%q, err.Error())\n\t\t\treturn true, false\n\t\t}\n", "counting the group policy assignments failed")
+	fmt.Fprintf(&b, "\t\tif e := clamp(n); e != expected {\n")
+	fmt.Fprintf(&b, "\t\t\tcount, expected = n, e\n")
+	fmt.Fprintf(&b, "\t\t\tif got, ok, err = r.waitFor(ctx, group, done); err != nil {\n\t\t\t\tdiags.AddError(%q, err.Error())\n\t\t\t\treturn true, false\n\t\t\t}\n", readErr)
+	fmt.Fprintf(&b, "\t\t}\n\t}\n")
 	fmt.Fprintf(&b, "\tif !ok {\n")
-	fmt.Fprintf(&b, "\t\tdiags.AddError(%q, fmt.Sprintf(%q, got.name, got.rank, want, rank))\n\t\treturn true, false\n\t}\n",
+	fmt.Fprintf(&b, "\t\tdiags.AddError(%q, fmt.Sprintf(%q, got.name, got.rank, want, rank, expected, count))\n\t\treturn true, false\n\t}\n",
 		"group policy assignment did not reach the requested state",
-		"After "+grantCmdlet+" -Group, Teams reports policy %q at rank %d; requested %q at rank %d. Teams places a rank beyond the number of "+ptype+" group assignments last, so such a rank cannot be reached: lower it to at most that number.")
+		"After "+grantCmdlet+" -Group, Teams reports policy %q at rank %d; requested %q at rank %d, expected at rank %d of %d "+ptype+" group assignments before the grant. The grant was not confirmed on consecutive reads.")
 	fmt.Fprintf(&b, "\tif got.rank != rank {\n")
 	fmt.Fprintf(&b, "\t\tdiags.AddAttributeWarning(path.Root(%q), %q, fmt.Sprintf(%q, got.rank, rank, rank))\n\t}\n", "rank", "Rank placed last",
 		"Teams reports the assignment at rank %d instead of %d. Teams places a rank beyond the number of "+ptype+" group assignments last. The next refresh shows the difference as drift, and an apply sets rank %d once the lower ranks exist.")

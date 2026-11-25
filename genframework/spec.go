@@ -261,15 +261,17 @@ type Resource struct {
 	// generated resource has `group_id` (Required, RequiresReplace, UUID),
 	// `policy_name` (Required) and `rank` (Required, >= 1, updatable):
 	//
-	//   - Create/Update call the grant op with the group in Create.IdentityField
-	//     (default "Group"), PolicyName and Rank (*int64), then poll
-	//     AssignmentGroupRead until the name and the rank match. Teams places a
-	//     rank beyond the number of group assignments of the type last: that is a
-	//     warning (the next refresh shows it as drift), so lower ranks created
-	//     later in the same apply converge on the next run. A grant that is not
-	//     confirmed on consecutive reads fails the apply, and so does re-applying
-	//     a rank that stays beyond that number (the read never changes); after
-	//     Create the state is still saved, so Terraform taints the resource.
+	//   - Create/Update read the number of group assignments of the type
+	//     (AssignmentGroupCount), call the grant op with the group in
+	//     Create.IdentityField (default "Group"), PolicyName and Rank (*int64),
+	//     then poll AssignmentGroupRead until the name and the rank match. Teams
+	//     places a rank beyond that number (one more for a group without an
+	//     assignment) last, so the wait expects that rank and warns (the next
+	//     refresh shows it as drift). Lower ranks created later in the same apply,
+	//     in whatever order Terraform runs them, converge on the next run, and a
+	//     rank that stays beyond the number warns on every apply. A grant that is
+	//     not confirmed on consecutive reads fails the apply; after Create the
+	//     state is still saved, so Terraform taints the resource.
 	//   - Read stores the rank Teams reports, so a rank renumbered by another
 	//     assignment of the same type is drift; an empty name removes the resource.
 	//   - Delete grants with no PolicyName (null unassign) and waits until the read
@@ -283,6 +285,11 @@ type Resource struct {
 	// func(ctx context.Context, groupID, policyType string) (name string, rank int64, err error)
 	// (name == "" ⇒ no assignment). Defaults to "GroupPolicyAssignment".
 	AssignmentGroupRead string
+	// AssignmentGroupCount names the helper on the bindings service that counts
+	// the group assignments of AssignmentPolicyType, with signature
+	// func(ctx context.Context, policyType string) (int64, error). Defaults to
+	// "GroupPolicyAssignmentCount".
+	AssignmentGroupCount string
 }
 
 // Config carries the provider-level constants shared by all generated files and
