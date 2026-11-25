@@ -308,9 +308,10 @@ type Config struct {
 	BindingsPkg string
 	// WriteConflict names a provider helper func(error) bool that reports a
 	// write the service rejected only because a parallel write to the same
-	// tenant won, e.g. Teams answering concurrent New-/Set-Cs*Policy calls with
-	// HTTP 409 errorCode 40904/40902 (one etag-guarded document per policy type
-	// and tenant). When set, the main New, Set, Toggle and Remove calls retry it
+	// tenant won, e.g. Teams answering concurrent New-/Set-/Remove-Cs*Policy
+	// calls with HTTP 409 errorCode 40904 (create conflict), 40902 (update
+	// conflict) or 40903 (delete conflict), from one etag-guarded document per
+	// policy type and tenant. When set, the main New, Set, Toggle and Remove calls retry it
 	// with exponential backoff and full jitter (resourcex.RetryConflict), on a
 	// budget separate from the not-found retry. It must not match an error that
 	// retrying cannot fix, such as Teams' 409 errorCode 40901 "already exists".
