@@ -476,8 +476,10 @@ func genRead(b *bytes.Buffer, cfg Config, r Resource, recv, model string) {
 	fmt.Fprintf(b, "\tvar state %s\n", model)
 	fmt.Fprintf(b, "\tresp.Diagnostics.Append(req.State.Get(ctx, &state)...)\n")
 	fmt.Fprintf(b, "\tif resp.Diagnostics.HasError() {\n\t\treturn\n\t}\n")
+	fmt.Fprintf(b, "\tprior := state\n")
 	fmt.Fprintf(b, "\tif !r.refresh(ctx, r.identityOf(state), &state, &resp.Diagnostics, nil) {\n")
 	fmt.Fprintf(b, "\t\tif !resp.Diagnostics.HasError() {\n\t\t\tresp.State.RemoveResource(ctx)\n\t\t}\n\t\treturn\n\t}\n")
+	fmt.Fprintf(b, "\tr.reconcileRead(&prior, &state)\n")
 	fmt.Fprintf(b, "\tresp.Diagnostics.Append(resp.State.Set(ctx, &state)...)\n}\n\n")
 }
 
@@ -816,6 +818,18 @@ func genHelpers(b *bytes.Buffer, cfg Config, r Resource, recv, model, svc, pkg s
 	}
 	if r.Members != nil {
 		fmt.Fprintf(b, "\tread.%s = reconcile.KeepSet(cfg.%s, read.%s)\n", r.Members.Field, r.Members.Field, r.Members.Field)
+	}
+	fmt.Fprintf(b, "}\n\n")
+
+	// reconcileRead keeps the state's casing of plain strings that the service
+	// reads back in a different case (Read has no config to reconcile against).
+	// Object (JSON) attributes are excluded: getObjectJSON normalises them and
+	// they are compared semantically elsewhere.
+	fmt.Fprintf(b, "func (r *%s) reconcileRead(prior, read *%s) {\n", recv, model)
+	for _, a := range r.Attributes {
+		if a.Type == TypeString && !a.Object {
+			fmt.Fprintf(b, "\tread.%s = reconcile.KeepStrFold(prior.%s, read.%s)\n", a.Field, a.Field, a.Field)
+		}
 	}
 	fmt.Fprintf(b, "}\n")
 

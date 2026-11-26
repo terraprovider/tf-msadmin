@@ -470,3 +470,30 @@ func TestUpdateKeepsPlannedID(t *testing.T) {
 	cfg, r = configResource(true)
 	wantAll(t, genOne(t, cfg, r), keep)
 }
+
+// TestReadKeepsStateCasing verifies that Read reconciles the refreshed model
+// against the prior state, so a service that echoes its own casing of a written
+// enum value ("Moderate" for "MODERATE") does not produce a case-only diff on
+// every plan. Plain strings only: Object (JSON) attributes are normalised by
+// getObjectJSON, and bools/sets have no casing.
+func TestReadKeepsStateCasing(t *testing.T) {
+	cfg, r := roleGroupFixture()
+	r.Attributes = append(r.Attributes, Attribute{TFName: "auto_forwarding_mode", Field: "AutoForwardingMode", APIName: "AutoForwardingMode",
+		Type: TypeString, Computed: true, Object: true, InCreate: true, InUpdate: true})
+	src := genOne(t, cfg, r)
+	wantAll(t, src,
+		"\tprior := state\n",
+		"\tr.reconcileRead(&prior, &state)\n\tresp.Diagnostics.Append(resp.State.Set(ctx, &state)...)",
+		"func (r *roleGroupResource) reconcileRead(prior, read *roleGroupModel) {",
+		"read.Description = reconcile.KeepStrFold(prior.Description, read.Description)",
+		"read.Name = reconcile.KeepStrFold(prior.Name, read.Name)",
+	)
+	for _, notWant := range []string{
+		"reconcile.KeepStrFold(prior.AutoForwardingMode", // Object attribute
+		"reconcile.KeepStrFold(prior.Roles",              // set attribute
+	} {
+		if strings.Contains(src, notWant) {
+			t.Errorf("reconcileRead must not fold %q", notWant)
+		}
+	}
+}
